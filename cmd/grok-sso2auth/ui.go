@@ -6,6 +6,7 @@ func uiHTML() []byte {
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="color-scheme" content="light dark"/>
 <title>Grok SSO 导入</title>
 <script>
 (function(){
@@ -44,8 +45,18 @@ func uiHTML() []byte {
         const value=styles.getPropertyValue(token).trim();
         if(value)root.style.setProperty(token,value);
       }
-      return {applied:parentRoot.getAttribute("data-theme")||"",root:parentRoot};
+      return {applied:parentRoot.getAttribute("data-theme")||"",background:styles.getPropertyValue("--bg-secondary").trim(),root:parentRoot};
     }catch(_){return null;}
+  }
+  function bootstrapBackground(applied,inherited){
+    const background=(inherited&&inherited.background)||(applied==="dark"?"#151412":applied==="white"?"#ffffff":"#faf9f5");
+    root.style.backgroundColor=background;
+    try{
+      if(window.frameElement){
+        window.frameElement.style.backgroundColor=background;
+        window.frameElement.style.colorScheme=applied==="dark"?"dark":"light";
+      }
+    }catch(_){}
   }
   function sync(){
     const inherited=parentTheme();
@@ -53,6 +64,7 @@ func uiHTML() []byte {
     if(applied==="dark"||applied==="white")root.setAttribute("data-theme",applied);
     else root.removeAttribute("data-theme");
     root.style.colorScheme=applied==="dark"?"dark":"light";
+    bootstrapBackground(applied,inherited);
     root.setAttribute("data-theme-source",inherited?"parent":"local");
     return {applied:applied||"light",source:inherited?"parent":"local",parentRoot:inherited&&inherited.root};
   }
@@ -98,7 +110,7 @@ func uiHTML() []byte {
     --amber-color:#f59e0b; --amber-text:#fcd34d; --amber-10:color-mix(in srgb,var(--amber-color) 14%,transparent); --amber-30:color-mix(in srgb,var(--amber-color) 38%,transparent);
     --shadow:0 1px 3px 0 rgb(0 0 0/.3);
   }
-  *{box-sizing:border-box} html{background:var(--bg)} body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans);transition:background-color .2s,color .2s}
+  *{box-sizing:border-box} html{background:var(--bg)} body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans)}
   [hidden]{display:none!important}
   main{width:min(1000px,100%);margin:0 auto;padding:32px clamp(18px,4vw,48px) 48px}
   .hero{display:flex;justify-content:space-between;align-items:flex-start;gap:28px;margin-bottom:24px}

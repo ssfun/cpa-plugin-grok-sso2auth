@@ -97,7 +97,7 @@ func TestManagementUIServesHTML(t *testing.T) {
 			t.Fatalf("body still contains removed module %q", unwanted)
 		}
 	}
-	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver"} {
+	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver", "bootstrapBackground", "window.frameElement.style.backgroundColor"} {
 		if !strings.Contains(body, wanted) {
 			t.Fatalf("body missing %q", wanted)
 		}
@@ -107,6 +107,9 @@ func TestManagementUIServesHTML(t *testing.T) {
 	}
 	if !strings.Contains(body, `root.setAttribute("data-theme-source",inherited?"parent":"local")`) {
 		t.Fatal("theme bridge must prefer the management center parent theme")
+	}
+	if strings.Contains(body, `transition:background-color`) {
+		t.Fatal("background transitions cause a visible iframe theme flash")
 	}
 	ct := resp.Headers.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {

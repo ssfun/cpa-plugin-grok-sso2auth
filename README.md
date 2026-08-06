@@ -21,7 +21,6 @@
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
 | **批量** | 多行 SSO / `email----password----sso`，账号间可配置间隔 |
 | **CLI 标志** | `--grok-sso-cookie` / `--grok-sso-file` 等 |
-| **独立脚本** | 仓库内仍保留 `sso2auth.py`，可在无 CPA 环境单独使用 |
 
 ---
 

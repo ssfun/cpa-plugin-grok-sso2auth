@@ -42,7 +42,6 @@ cpa-plugin-grok-sso2auth/
 ├── registry.json          # 插件商店 registry 片段
 ├── Makefile
 ├── go.mod
-├── sso2auth.py            # 独立 Python 版转换脚本
 ├── LICENSE
 └── README.md
 ```

@@ -138,15 +138,6 @@ GET  /v0/management/plugins/grok-sso2auth/list
 | `--grok-sso-delay` | 批量账号间隔秒，默认 45 |
 | `--grok-sso-validate` | 是否先访问 accounts.x.ai 校验 SSO |
 
-### 5. 独立 Python 脚本
-
-不依赖 CPA 插件时，仍可使用原脚本：
-
-```bash
-python3 sso2auth.py --sso sso_list.txt --cliproxy ~/.cli-proxy-api
-python3 sso2auth.py --sso-cookie 'eyJ...' --cliproxy ~/.cli-proxy-api
-```
-
 ---
 
 ## 输出凭证格式

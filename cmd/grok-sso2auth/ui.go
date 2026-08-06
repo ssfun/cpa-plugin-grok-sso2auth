@@ -30,26 +30,33 @@ func uiHTML() []byte {
       return String(value&&value.state&&value.state.theme||value&&value.theme||value||"auto");
     }catch(_){return "auto";}
   }
-  function fallbackTheme(){
-    const preference=storedPreference();
+  function resolvePreference(preference){
     if(preference==="dark"||preference==="white")return preference;
     if(preference==="light")return "";
     return systemDark()?"dark":"white";
   }
+  function fallbackTheme(){return resolvePreference(storedPreference());}
+  function themeBackground(applied){return applied==="dark"?"#151412":applied==="white"?"#ffffff":"#faf9f5";}
   function parentTheme(){
     if(window.parent===window)return null;
     try{
       const parentRoot=window.parent.document.documentElement;
       const styles=window.parent.getComputedStyle(parentRoot);
-      for(const token of TOKENS){
-        const value=styles.getPropertyValue(token).trim();
-        if(value)root.style.setProperty(token,value);
+      const current=parentRoot.getAttribute("data-theme")||"";
+      const anticipated=resolvePreference(storedPreference());
+      const applied=current||(anticipated||"");
+      const parentReady=current===applied;
+      if(parentReady){
+        for(const token of TOKENS){
+          const value=styles.getPropertyValue(token).trim();
+          if(value)root.style.setProperty(token,value);
+        }
       }
-      return {applied:parentRoot.getAttribute("data-theme")||"",background:styles.getPropertyValue("--bg-secondary").trim(),root:parentRoot};
+      return {applied:applied,background:parentReady?styles.getPropertyValue("--bg-secondary").trim():themeBackground(applied),root:parentRoot};
     }catch(_){return null;}
   }
   function bootstrapBackground(applied,inherited){
-    const background=(inherited&&inherited.background)||(applied==="dark"?"#151412":applied==="white"?"#ffffff":"#faf9f5");
+    const background=(inherited&&inherited.background)||themeBackground(applied);
     root.style.backgroundColor=background;
     try{
       if(window.frameElement){
@@ -69,7 +76,15 @@ func uiHTML() []byte {
     return {applied:applied||"light",source:inherited?"parent":"local",parentRoot:inherited&&inherited.root};
   }
   window.__cpaThemeBridge={storageKey:STORAGE_KEY,sync:sync};
-  sync();
+  const initial=sync();
+  if(initial&&initial.parentRoot){
+    try{new MutationObserver(()=>sync()).observe(initial.parentRoot,{attributes:true,attributeFilter:["data-theme"]});}catch(_){}
+  }
+  window.addEventListener("storage",event=>{if(event.key===STORAGE_KEY)sync();});
+  if(window.matchMedia){
+    const media=window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener&&media.addEventListener("change",()=>sync());
+  }
 })();
 </script>
 <style>
@@ -237,22 +252,6 @@ func uiHTML() []byte {
   const state={managementKey:"",busy:false,timer:0,startedAt:0};
   const $=id=>document.getElementById(id);
 
-  function installThemeBridge(){
-    const bridge=window.__cpaThemeBridge;
-    if(!bridge)return;
-    const current=bridge.sync();
-    if(current&&current.parentRoot){
-      try{
-        new MutationObserver(()=>bridge.sync()).observe(current.parentRoot,{attributes:true,attributeFilter:["data-theme"]});
-      }catch(_){}
-    }
-    window.addEventListener("storage",event=>{if(event.key===bridge.storageKey)bridge.sync();});
-    if(window.matchMedia){
-      const media=window.matchMedia("(prefers-color-scheme: dark)");
-      media.addEventListener&&media.addEventListener("change",()=>bridge.sync());
-    }
-  }
-
   function escapeHTML(value){return String(value==null?"":value).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
   function decodeProtected(raw){
     if(!raw||!raw.startsWith(ENCRYPTED_PREFIX))return raw||"";
@@ -350,7 +349,6 @@ func uiHTML() []byte {
   $("ssoInput").addEventListener("input",updateInput);
   ["baseDelay","maxDelay","stageRetries","accountRetries"].forEach(id=>$(id).addEventListener("input",updateInput));
   $("startButton").addEventListener("click",start);
-  installThemeBridge();
   state.managementKey=loadManagementKey();setSession(Boolean(state.managementKey));updateInput();
 })();
 </script>

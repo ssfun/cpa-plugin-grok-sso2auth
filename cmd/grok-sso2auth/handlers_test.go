@@ -97,7 +97,7 @@ func TestManagementUIServesHTML(t *testing.T) {
 			t.Fatalf("body still contains removed module %q", unwanted)
 		}
 	}
-	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver", "bootstrapBackground", "window.frameElement.style.backgroundColor"} {
+	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver", "bootstrapBackground", "window.frameElement.style.backgroundColor", "parentReady", "resolvePreference"} {
 		if !strings.Contains(body, wanted) {
 			t.Fatalf("body missing %q", wanted)
 		}

@@ -1,4 +1,4 @@
-module github.com/jiegto/grok-sso2auth-plugin
+module github.com/ssfun/cpa-plugin-grok-sso2auth
 
 go 1.26.0
 

@@ -28,7 +28,7 @@
 ## 仓库结构
 
 ```text
-grok-sso2auth-plugin/
+cpa-plugin-grok-sso2auth/
 ├── cmd/grok-sso2auth/     # 插件入口（C ABI + 业务）
 │   ├── abi.go             # cliproxy_plugin_init / call / free / shutdown
 │   ├── handlers.go        # plugin.register / management.* / command_line.*
@@ -200,7 +200,7 @@ make package VERSION=0.1.0
 ```yaml
 plugins:
   store-sources:
-    - "https://raw.githubusercontent.com/<you>/grok-sso2auth-plugin/main/registry.json"
+    - "https://raw.githubusercontent.com/ssfun/cpa-plugin-grok-sso2auth/main/registry.json"
 ```
 
 ---

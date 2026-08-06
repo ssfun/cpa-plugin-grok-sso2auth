@@ -18,8 +18,8 @@ const (
 	pluginName = "Grok SSO → Auth"
 	// pluginVersion is overridden at link time:
 	//   -ldflags "-X main.pluginVersion=1.2.3"
-	pluginAuthor = "jiegto"
-	pluginRepo   = "https://github.com/jiegto/grok-sso2auth-plugin"
+	pluginAuthor = "sfun"
+	pluginRepo   = "https://github.com/ssfun/cpa-plugin-grok-sso2auth"
 
 	resourceUIPath = "/"
 	// Management API paths (relative; host mounts under /v0/management).

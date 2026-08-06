@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -27,13 +26,14 @@ const (
 	// Management API paths (relative; host mounts under /v0/management).
 	mgmtConvertPath       = "/plugins/grok-sso2auth/convert"
 	mgmtConvertImportPath = "/plugins/grok-sso2auth/convert-import"
-	mgmtImportPath        = "/plugins/grok-sso2auth/import"
-	mgmtListPath          = "/plugins/grok-sso2auth/list"
-	mgmtAuthRuntimePath   = "/plugins/grok-sso2auth/auth-runtime"
+
+	defaultBatchDelaySec  = 45.0
+	defaultMaxDelaySec    = 180.0
+	defaultAccountRetries = 3
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.2.0"
+var pluginVersion = "0.3.0"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -68,7 +68,6 @@ type managementRequest struct {
 	Method         string      `json:"Method"`
 	Path           string      `json:"Path"`
 	Headers        http.Header `json:"Headers"`
-	Query          url.Values  `json:"Query"`
 	Body           []byte      `json:"Body"`
 	HostCallbackID string      `json:"host_callback_id,omitempty"`
 }
@@ -82,38 +81,34 @@ type managementResponse struct {
 type convertRequest struct {
 	SSO            string  `json:"sso"`
 	Email          string  `json:"email,omitempty"`
-	ValidateSSO    bool    `json:"validate_sso,omitempty"`
+	ValidateSSO    *bool   `json:"validate_sso,omitempty"`
 	MaxRetries     int     `json:"max_retries,omitempty"`
+	AccountRetries int     `json:"account_retries,omitempty"`
 	BaseDelaySec   float64 `json:"base_delay_sec,omitempty"`
+	MaxDelaySec    float64 `json:"max_delay_sec,omitempty"`
 	PollTimeoutSec int     `json:"poll_timeout_sec,omitempty"`
-	// Import controls whether convert-import saves via host.auth.save.
-	Import bool `json:"import,omitempty"`
-	// DelaySec is the pause between multi-line accounts (convert batch).
-	DelaySec float64 `json:"delay_sec,omitempty"`
-}
-
-type importRequest struct {
-	// Name is the auth file name (must end with .json). Optional if auth.email/sub present.
-	Name string          `json:"name,omitempty"`
-	JSON json.RawMessage `json:"json"`
 }
 
 type batchItemResult struct {
-	Index    int             `json:"index"`
-	OK       bool            `json:"ok"`
-	Email    string          `json:"email,omitempty"`
-	FileName string          `json:"file_name,omitempty"`
-	Path     string          `json:"path,omitempty"`
-	Error    string          `json:"error,omitempty"`
-	Auth     json.RawMessage `json:"auth,omitempty"`
+	Index       int             `json:"index"`
+	OK          bool            `json:"ok"`
+	Email       string          `json:"email,omitempty"`
+	FileName    string          `json:"file_name,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Auth        json.RawMessage `json:"auth,omitempty"`
+	Attempts    int             `json:"attempts,omitempty"`
+	RateLimited bool            `json:"rate_limited,omitempty"`
 }
 
 type batchResponse struct {
-	OK      int               `json:"ok"`
-	Fail    int               `json:"fail"`
-	Total   int               `json:"total"`
-	Items   []batchItemResult `json:"items"`
-	Message string            `json:"message,omitempty"`
+	OK            int               `json:"ok"`
+	Fail          int               `json:"fail"`
+	Total         int               `json:"total"`
+	Items         []batchItemResult `json:"items"`
+	Message       string            `json:"message,omitempty"`
+	Imported      bool              `json:"imported"`
+	BaseDelaySec  float64           `json:"base_delay_sec,omitempty"`
+	FinalDelaySec float64           `json:"final_delay_sec,omitempty"`
 }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
@@ -130,9 +125,6 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			Routes: []managementRoute{
 				{Method: http.MethodPost, Path: mgmtConvertPath, Description: "SSO → xai auth JSON（不写入）"},
 				{Method: http.MethodPost, Path: mgmtConvertImportPath, Description: "SSO → xai auth JSON 并 host.auth.save 导入"},
-				{Method: http.MethodPost, Path: mgmtImportPath, Description: "直接导入已有 xai auth JSON"},
-				{Method: http.MethodGet, Path: mgmtListPath, Description: "列出当前 auth 文件"},
-				{Method: http.MethodGet, Path: mgmtAuthRuntimePath, Description: "读取指定 auth 的运行时摘要"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -158,15 +150,33 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 				},
 				{
 					"Name":         "grok-sso-delay",
-					"Usage":        "Seconds between accounts when using --grok-sso-file (default 45)",
+					"Usage":        "Base seconds between accounts; adaptive pacing starts at 45",
 					"Type":         "float64",
-					"DefaultValue": 45,
+					"DefaultValue": defaultBatchDelaySec,
+				},
+				{
+					"Name":         "grok-sso-max-delay",
+					"Usage":        "Maximum adaptive delay between accounts (default 180)",
+					"Type":         "float64",
+					"DefaultValue": defaultMaxDelaySec,
+				},
+				{
+					"Name":         "grok-sso-retries",
+					"Usage":        "Maximum device/verify/approve retries per account (default 8)",
+					"Type":         "int",
+					"DefaultValue": 8,
+				},
+				{
+					"Name":         "grok-sso-account-retries",
+					"Usage":        "Whole-account retries after rate limiting (default 3)",
+					"Type":         "int",
+					"DefaultValue": defaultAccountRetries,
 				},
 				{
 					"Name":         "grok-sso-validate",
 					"Usage":        "Validate SSO against accounts.x.ai before device flow",
 					"Type":         "bool",
-					"DefaultValue": false,
+					"DefaultValue": true,
 				},
 			},
 		})
@@ -185,18 +195,6 @@ func pluginRegistration() registration {
 			Version:          pluginVersion,
 			Author:           pluginAuthor,
 			GitHubRepository: pluginRepo,
-			ConfigFields: []pluginapi.ConfigField{
-				{
-					Name:        "default_delay_sec",
-					Type:        pluginapi.ConfigFieldTypeNumber,
-					Description: "Default seconds between batch accounts (default 45).",
-				},
-				{
-					Name:        "validate_sso",
-					Type:        pluginapi.ConfigFieldTypeBoolean,
-					Description: "Pre-validate SSO cookie via accounts.x.ai (extra request).",
-				},
-			},
 		},
 		Capabilities: regCapabilities{
 			ManagementAPI:     true,
@@ -226,12 +224,6 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(jsonAPIResponse(handleConvert(req.Body, false)))
 	case method == http.MethodPost && pathMatch(p, mgmtConvertImportPath):
 		return okEnvelope(jsonAPIResponse(handleConvert(req.Body, true)))
-	case method == http.MethodPost && pathMatch(p, mgmtImportPath):
-		return okEnvelope(jsonAPIResponse(handleImport(req.Body)))
-	case method == http.MethodGet && pathMatch(p, mgmtListPath):
-		return okEnvelope(jsonAPIResponse(handleList()))
-	case method == http.MethodGet && pathMatch(p, mgmtAuthRuntimePath):
-		return okEnvelope(jsonAPIResponse(handleAuthRuntime(req.Query)))
 	default:
 		body, _ := json.Marshal(map[string]any{
 			"error":  "not_found",
@@ -312,32 +304,54 @@ func handleConvert(body []byte, doImport bool) (int, any) {
 		return http.StatusBadRequest, map[string]string{"error": "sso is required (cookie or multi-line list)"}
 	}
 
-	delay := req.DelaySec
-	if delay < 0 {
-		delay = 0
+	validateSSO := true
+	if req.ValidateSSO != nil {
+		validateSSO = *req.ValidateSSO
 	}
-	if delay == 0 && len(entries) > 1 {
-		delay = 45
+	accountRetries := req.AccountRetries
+	if accountRetries <= 0 {
+		accountRetries = defaultAccountRetries
 	}
-
-	resp := batchResponse{Total: len(entries), Items: make([]batchItemResult, 0, len(entries))}
+	pacer := newAdaptivePacer(req.BaseDelaySec, req.MaxDelaySec)
+	resp := batchResponse{
+		Total:        len(entries),
+		Items:        make([]batchItemResult, 0, len(entries)),
+		Imported:     doImport,
+		BaseDelaySec: pacer.Base(),
+	}
 	for i, ent := range entries {
 		item := batchItemResult{Index: i + 1, Email: ent.Email}
 		email := firstNonEmpty(req.Email, ent.Email)
-		result, err := ConvertSSO(ConvertOptions{
-			SSO:            ent.SSO,
-			Email:          email,
-			ValidateSSO:    req.ValidateSSO,
-			MaxRetries:     req.MaxRetries,
-			BaseDelaySec:   req.BaseDelaySec,
-			PollTimeoutSec: req.PollTimeoutSec,
-		})
+		var result *ConvertResult
+		var err error
+		for attempt := 1; attempt <= accountRetries; attempt++ {
+			item.Attempts = attempt
+			result, err = ConvertSSO(ConvertOptions{
+				SSO:            ent.SSO,
+				Email:          email,
+				ValidateSSO:    validateSSO,
+				MaxRetries:     req.MaxRetries,
+				BaseDelaySec:   15,
+				PollTimeoutSec: req.PollTimeoutSec,
+			})
+			if err == nil || !isRateLimitedError(err) {
+				break
+			}
+			item.RateLimited = true
+			pacer.OnRateLimit()
+			if attempt < accountRetries {
+				time.Sleep(pacer.AccountRetryDelay(attempt))
+			}
+		}
 		if err != nil {
 			item.Error = err.Error()
 			resp.Fail++
 			resp.Items = append(resp.Items, item)
-			if i < len(entries)-1 && delay > 0 {
-				time.Sleep(time.Duration(delay * float64(time.Second)))
+			if item.RateLimited {
+				pacer.OnRateLimit()
+			}
+			if i < len(entries)-1 {
+				time.Sleep(pacer.BetweenAccountsDelay())
 			}
 			continue
 		}
@@ -345,7 +359,9 @@ func handleConvert(body []byte, doImport bool) (int, any) {
 		item.Email = result.Email
 		item.FileName = result.FileName
 		authJSON, _ := json.Marshal(result.Auth)
-		item.Auth = authJSON
+		if !doImport {
+			item.Auth = authJSON
+		}
 
 		if doImport {
 			saved, errSave := hostAuthSave(result.FileName, authJSON)
@@ -354,7 +370,6 @@ func handleConvert(body []byte, doImport bool) (int, any) {
 				item.Error = "converted but import failed: " + errSave.Error()
 				resp.Fail++
 			} else {
-				item.Path = saved.Path
 				item.FileName = saved.Name
 				resp.OK++
 			}
@@ -362,178 +377,18 @@ func handleConvert(body []byte, doImport bool) (int, any) {
 			resp.OK++
 		}
 		resp.Items = append(resp.Items, item)
-		if i < len(entries)-1 && delay > 0 {
-			time.Sleep(time.Duration(delay * float64(time.Second)))
+		pacer.OnSuccess()
+		if i < len(entries)-1 {
+			time.Sleep(pacer.BetweenAccountsDelay())
 		}
 	}
+	resp.FinalDelaySec = pacer.Current()
 	resp.Message = fmt.Sprintf("%d/%d succeeded", resp.OK, resp.Total)
 	status := http.StatusOK
 	if resp.OK == 0 {
 		status = http.StatusBadGateway
 	}
 	return status, resp
-}
-
-func handleImport(body []byte) (int, any) {
-	var req importRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()}
-	}
-	if len(req.JSON) == 0 || string(req.JSON) == "null" {
-		return http.StatusBadRequest, map[string]string{"error": "json is required"}
-	}
-	var probe struct {
-		Email string `json:"email"`
-		Sub   string `json:"sub"`
-		Type  string `json:"type"`
-	}
-	if err := json.Unmarshal(req.JSON, &probe); err != nil {
-		return http.StatusBadRequest, map[string]string{"error": "invalid auth json: " + err.Error()}
-	}
-	if !strings.EqualFold(strings.TrimSpace(probe.Type), "xai") {
-		return http.StatusBadRequest, map[string]string{"error": "auth json type must be xai"}
-	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		// derive from payload
-		name = credentialFileName(probe.Email, probe.Sub)
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		name += ".json"
-	}
-	saved, err := hostAuthSave(name, req.JSON)
-	if err != nil {
-		return http.StatusBadGateway, map[string]string{"error": err.Error()}
-	}
-	return http.StatusOK, map[string]any{
-		"ok":   true,
-		"name": saved.Name,
-		"path": saved.Path,
-	}
-}
-
-func handleList() (int, any) {
-	result, err := callHost(pluginabi.MethodHostAuthList, map[string]any{})
-	if err != nil {
-		return http.StatusBadGateway, map[string]string{"error": err.Error()}
-	}
-	var list struct {
-		Files []pluginapi.HostAuthFileEntry `json:"files"`
-	}
-	if err := json.Unmarshal(result, &list); err != nil {
-		return http.StatusBadGateway, map[string]string{"error": "decode list: " + err.Error()}
-	}
-	// Strip sensitive runtime fields such as physical paths. The host callback
-	// intentionally exposes a richer entry than a browser list needs.
-	summaries := make([]authSummary, 0, len(list.Files))
-	for _, f := range list.Files {
-		summaries = append(summaries, summarizeAuth(f))
-	}
-	return http.StatusOK, map[string]any{"files": summaries, "count": len(summaries)}
-}
-
-// authSummary is the safe browser-facing subset of pluginapi.HostAuthFileEntry.
-// In particular, it omits Path and any credential JSON returned by host.auth.get.
-type authSummary struct {
-	ID             string                 `json:"id,omitempty"`
-	AuthIndex      string                 `json:"auth_index,omitempty"`
-	Name           string                 `json:"name"`
-	Type           string                 `json:"type,omitempty"`
-	Provider       string                 `json:"provider,omitempty"`
-	Label          string                 `json:"label,omitempty"`
-	Status         string                 `json:"status,omitempty"`
-	StatusMessage  string                 `json:"status_message,omitempty"`
-	Disabled       bool                   `json:"disabled,omitempty"`
-	Unavailable    bool                   `json:"unavailable,omitempty"`
-	RuntimeOnly    bool                   `json:"runtime_only,omitempty"`
-	Source         string                 `json:"source,omitempty"`
-	Size           int64                  `json:"size,omitempty"`
-	ModTime        time.Time              `json:"modtime,omitempty"`
-	UpdatedAt      time.Time              `json:"updated_at,omitempty"`
-	CreatedAt      time.Time              `json:"created_at,omitempty"`
-	LastRefresh    time.Time              `json:"last_refresh,omitempty"`
-	NextRetryAfter time.Time              `json:"next_retry_after,omitempty"`
-	Email          string                 `json:"email,omitempty"`
-	ProjectID      string                 `json:"project_id,omitempty"`
-	AccountType    string                 `json:"account_type,omitempty"`
-	Account        string                 `json:"account,omitempty"`
-	Priority       int                    `json:"priority,omitempty"`
-	Note           string                 `json:"note,omitempty"`
-	Websockets     bool                   `json:"websockets,omitempty"`
-	Success        int64                  `json:"success,omitempty"`
-	Failed         int64                  `json:"failed,omitempty"`
-	RecentRequests []recentRequestSummary `json:"recent_requests,omitempty"`
-}
-
-type recentRequestSummary struct {
-	Time    string `json:"time"`
-	Success int64  `json:"success"`
-	Failed  int64  `json:"failed"`
-}
-
-func summarizeAuth(f pluginapi.HostAuthFileEntry) authSummary {
-	result := authSummary{
-		ID:             f.ID,
-		AuthIndex:      f.AuthIndex,
-		Name:           f.Name,
-		Type:           f.Type,
-		Provider:       f.Provider,
-		Label:          f.Label,
-		Status:         f.Status,
-		StatusMessage:  f.StatusMessage,
-		Disabled:       f.Disabled,
-		Unavailable:    f.Unavailable,
-		RuntimeOnly:    f.RuntimeOnly,
-		Source:         f.Source,
-		Size:           f.Size,
-		ModTime:        f.ModTime,
-		UpdatedAt:      f.UpdatedAt,
-		CreatedAt:      f.CreatedAt,
-		LastRefresh:    f.LastRefresh,
-		NextRetryAfter: f.NextRetryAfter,
-		Email:          f.Email,
-		ProjectID:      f.ProjectID,
-		AccountType:    f.AccountType,
-		Account:        f.Account,
-		Priority:       f.Priority,
-		Note:           f.Note,
-		Websockets:     f.Websockets,
-		Success:        f.Success,
-		Failed:         f.Failed,
-	}
-	if len(f.RecentRequests) > 0 {
-		result.RecentRequests = make([]recentRequestSummary, 0, len(f.RecentRequests))
-		for _, item := range f.RecentRequests {
-			result.RecentRequests = append(result.RecentRequests, recentRequestSummary{
-				Time: item.Time, Success: item.Success, Failed: item.Failed,
-			})
-		}
-	}
-	return result
-}
-
-func handleAuthRuntime(query url.Values) (int, any) {
-	authIndex := strings.TrimSpace(query.Get("auth_index"))
-	if authIndex == "" {
-		return http.StatusBadRequest, map[string]string{"error": "auth_index is required"}
-	}
-	result, err := callHost(pluginabi.MethodHostAuthGetRuntime, pluginapi.HostAuthGetRequest{
-		AuthIndex: authIndex,
-	})
-	if err != nil {
-		status := http.StatusBadGateway
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
-			status = http.StatusNotFound
-		}
-		return status, map[string]string{"error": err.Error()}
-	}
-	var runtimeInfo pluginapi.HostAuthGetRuntimeResponse
-	if err := json.Unmarshal(result, &runtimeInfo); err != nil {
-		return http.StatusBadGateway, map[string]string{"error": "decode runtime info: " + err.Error()}
-	}
-	return http.StatusOK, map[string]any{
-		"auth": summarizeAuth(runtimeInfo.Auth),
-	}
 }
 
 func hostAuthSave(name string, rawJSON json.RawMessage) (pluginapi.HostAuthSaveResponse, error) {
@@ -581,16 +436,11 @@ func handleCommandLine(raw []byte) ([]byte, error) {
 	cookie, _ := flags["grok-sso-cookie"].(string)
 	filePath, _ := flags["grok-sso-file"].(string)
 	email, _ := flags["grok-sso-email"].(string)
-	validate, _ := flags["grok-sso-validate"].(bool)
-	delay := 45.0
-	if v, ok := flags["grok-sso-delay"]; ok {
-		switch t := v.(type) {
-		case float64:
-			delay = t
-		case int:
-			delay = float64(t)
-		}
-	}
+	validate := boolFlag(flags, "grok-sso-validate", true)
+	delay := numberFlag(flags, "grok-sso-delay", defaultBatchDelaySec)
+	maxDelay := numberFlag(flags, "grok-sso-max-delay", defaultMaxDelaySec)
+	maxRetries := int(numberFlag(flags, "grok-sso-retries", 8))
+	accountRetries := int(numberFlag(flags, "grok-sso-account-retries", defaultAccountRetries))
 
 	var rawSSO string
 	if strings.TrimSpace(filePath) != "" {
@@ -607,11 +457,13 @@ func handleCommandLine(raw []byte) ([]byte, error) {
 	}
 
 	body, _ := json.Marshal(convertRequest{
-		SSO:         rawSSO,
-		Email:       email,
-		ValidateSSO: validate,
-		DelaySec:    delay,
-		Import:      true,
+		SSO:            rawSSO,
+		Email:          email,
+		ValidateSSO:    &validate,
+		BaseDelaySec:   delay,
+		MaxDelaySec:    maxDelay,
+		MaxRetries:     maxRetries,
+		AccountRetries: accountRetries,
 	})
 	status, payload := handleConvert(body, true)
 	pretty, _ := json.MarshalIndent(payload, "", "  ")
@@ -620,6 +472,40 @@ func handleCommandLine(raw []byte) ([]byte, error) {
 		exit = 1
 	}
 	return okEnvelope(cliResult(exit, string(pretty)+"\n", ""))
+}
+
+func numberFlag(flags map[string]any, name string, fallback float64) float64 {
+	v, ok := flags[name]
+	if !ok {
+		return fallback
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		if parsed, err := n.Float64(); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func boolFlag(flags map[string]any, name string, fallback bool) bool {
+	v, ok := flags[name]
+	if !ok {
+		return fallback
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return fallback
+	}
+	return b
 }
 
 func indexFlags(flags []commandLineFlag) map[string]any {

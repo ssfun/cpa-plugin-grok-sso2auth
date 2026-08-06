@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.2.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.3.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -16,10 +16,11 @@
 
 | 能力 | 说明 |
 |------|------|
-| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；转换、导入、auth 列表、运行时详情 |
+| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；自动复用管理中心认证，无需重复输入 Management Key |
 | **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `approve` → `token` → `userinfo` |
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
-| **批量** | 多行 SSO / `email----password----sso`，账号间可配置间隔 |
+| **批量** | 多行 SSO / `email----password----sso`，限流时自动提高账号间隔，成功后缓慢回落 |
+| **可靠性** | 默认验证 SSO；阶段重试、账号级限流重跑、重新申请并打开 Device Code |
 | **CLI 标志** | `--grok-sso-cookie` / `--grok-sso-file` 等 |
 
 ---
@@ -66,7 +67,7 @@ checksums.txt                                 # sha256 汇总
 make build
 
 # 打 zip + sha256
-make package VERSION=0.2.0
+make package VERSION=0.3.0
 
 # 安装到默认插件目录
 make install
@@ -83,8 +84,6 @@ plugins:
     grok-sso2auth:
       enabled: true
       priority: 1
-      # default_delay_sec: 45
-      # validate_sso: false
 ```
 
 重启或热加载后，管理中心应出现菜单 **「Grok SSO 导入」**，资源页：
@@ -102,21 +101,19 @@ curl -H "Authorization: Bearer <management-key>" \
 
 ### 3. 使用管理 UI
 
-1. 打开管理中心 → **Grok SSO 导入**，页面地址为 `/v0/resource/plugins/grok-sso2auth/status`
-2. 填写 Management Key；页面只保存本插件自己的 localStorage 项
+1. 登录管理中心时勾选 **记住密码**
+2. 打开管理中心 → **Grok SSO 导入**，页面会自动复用当前管理认证
 3. 粘贴 SSO Cookie（或 `email----sso` 多行）
-4. 选择 **仅转换** 或 **转换并导入**
-5. 在 Auth 列表中搜索、按提供商过滤，并按 auth index 查看宿主运行时详情
-6. 也可以展开「导入已有 xAI OAuth JSON」，直接调用宿主 `host.auth.save`
+4. 点击 **开始转换并导入**
+5. 在结果表中查看每个账号的文件名、尝试次数和限流状态
+
+自动认证依赖插件资源页与管理中心同源，并从管理中心的 `cli-proxy-auth` 持久会话读取认证。若未勾选“记住密码”，请回到管理中心重新登录；插件页面不会再次索要或保存 Management Key。
 
 页面 API 全部走：
 
 ```text
 POST /v0/management/plugins/grok-sso2auth/convert
 POST /v0/management/plugins/grok-sso2auth/convert-import
-POST /v0/management/plugins/grok-sso2auth/import
-GET  /v0/management/plugins/grok-sso2auth/list
-GET  /v0/management/plugins/grok-sso2auth/auth-runtime?auth_index=<AUTH_INDEX>
 ```
 
 ### 4. 命令行标志
@@ -130,7 +127,10 @@ GET  /v0/management/plugins/grok-sso2auth/auth-runtime?auth_index=<AUTH_INDEX>
 
 ./cli-proxy-api \
   --grok-sso-file ./sso_list.txt \
-  --grok-sso-delay 45
+  --grok-sso-delay 45 \
+  --grok-sso-max-delay 180 \
+  --grok-sso-retries 8 \
+  --grok-sso-account-retries 3
 ```
 
 | 标志 | 说明 |
@@ -138,8 +138,11 @@ GET  /v0/management/plugins/grok-sso2auth/auth-runtime?auth_index=<AUTH_INDEX>
 | `--grok-sso-cookie` | 单个 SSO JWT |
 | `--grok-sso-file` | 列表文件（一行一个 JWT，或 `email----sso`） |
 | `--grok-sso-email` | 可选 email 覆盖 |
-| `--grok-sso-delay` | 批量账号间隔秒，默认 45 |
-| `--grok-sso-validate` | 是否先访问 accounts.x.ai 校验 SSO |
+| `--grok-sso-delay` | 自适应批量账号基础间隔秒，默认 45 |
+| `--grok-sso-max-delay` | 自适应间隔上限秒，默认 180 |
+| `--grok-sso-retries` | Device / Verify / Approve 阶段最大重试次数，默认 8 |
+| `--grok-sso-account-retries` | 限流时整个账号的最大尝试次数，默认 3 |
+| `--grok-sso-validate` | 是否先访问 accounts.x.ai 校验 SSO，默认开启 |
 
 ---
 
@@ -183,7 +186,7 @@ GET  /v0/management/plugins/grok-sso2auth/auth-runtime?auth_index=<AUTH_INDEX>
 本地模拟：
 
 ```bash
-make package VERSION=0.1.0
+make package VERSION=0.3.0
 # 产物在 dist/
 ```
 
@@ -200,8 +203,10 @@ plugins:
 ## 安全说明
 
 - 插件与宿主**同进程**运行，仅应安装可信来源的构建产物。
-- 管理 UI 的 resource 页本身**不鉴权**；转换 / 导入 / 列表 / 运行时详情走 `/v0/management/...`，需 Management Key。
-- 列表和运行时详情只返回 `host.auth.list` / `host.auth.get_runtime` 的安全摘要，不返回物理路径和凭证 JSON；完整转换 JSON 只有手动勾选后才在页面展示。
+- 管理 UI 的 resource 页本身**不鉴权**；转换请求走 `/v0/management/...`，仍由宿主校验 Management Key。
+- 页面只读取管理中心已经持久化的认证并放入请求头，不提供再次输入 Management Key 的入口，也不会把它写入插件配置。
+- 管理中心未勾选“记住密码”或资源页跨源部署时，页面无法取得只存在父页面内存中的认证，需要回管理中心重新登录并持久化会话。
+- “转换并导入”响应不返回 OAuth JSON 或物理路径；仅 `/convert` API 会按调用方明确请求返回转换后的 JSON。
 - 不要把 SSO、access/refresh token 打进日志或 resource HTML。
 - 本仓库源码与 CI **不包含**任何真实密钥。
 
@@ -215,7 +220,7 @@ go vet ./...
 make build
 ```
 
-核心转换逻辑在 `cmd/grok-sso2auth/sso.go`。限流时会指数退避并重申 device code。
+核心转换逻辑在 `cmd/grok-sso2auth/sso.go`。Device / Verify / Approve 分阶段重试；Verify 或 Approve 限流后会重新申请并再次打开 Device Code。批量间隔默认 45 秒，限流时按 `max(current×1.8, current+25, 45)` 提升（最高 180 秒），成功后按 `current×0.92` 缓慢回落，并加入 0–10 秒抖动。
 
 ---
 

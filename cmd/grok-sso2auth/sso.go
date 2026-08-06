@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 const (
 	xaiClientID         = "b1a00492-073a-47ea-816f-4c329264a828"
 	xaiIssuer           = "https://auth.x.ai"
-	xaiScope            = "openid profile email offline_access grok-cli:access api:access"
+	xaiScope            = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write"
 	xaiDefaultAPIBase   = "https://api.x.ai/v1"
 	xaiTokenEndpoint    = xaiIssuer + "/oauth2/token"
 	xaiDeviceCodeURL    = xaiIssuer + "/oauth2/device/code"
@@ -62,19 +63,19 @@ type XAIAuthFile struct {
 
 // ConvertOptions controls SSO → token conversion.
 type ConvertOptions struct {
-	SSO           string
-	Email         string
-	ValidateSSO   bool
-	MaxRetries    int
-	BaseDelaySec  float64
+	SSO            string
+	Email          string
+	ValidateSSO    bool
+	MaxRetries     int
+	BaseDelaySec   float64
 	PollTimeoutSec int
 }
 
 // ConvertResult is one successful conversion.
 type ConvertResult struct {
-	FileName string     `json:"file_name"`
-	Email    string     `json:"email,omitempty"`
-	Subject  string     `json:"sub,omitempty"`
+	FileName string      `json:"file_name"`
+	Email    string      `json:"email,omitempty"`
+	Subject  string      `json:"sub,omitempty"`
 	Auth     XAIAuthFile `json:"auth"`
 }
 
@@ -92,6 +93,62 @@ type rateLimitedError struct {
 }
 
 func (e *rateLimitedError) Error() string { return e.msg }
+
+func isRateLimitedError(err error) bool {
+	var target *rateLimitedError
+	return errors.As(err, &target)
+}
+
+type adaptivePacer struct {
+	base    float64
+	current float64
+	max     float64
+	hits    int
+}
+
+func newAdaptivePacer(base, maxDelay float64) *adaptivePacer {
+	if base <= 0 {
+		base = defaultBatchDelaySec
+	}
+	if maxDelay < 30 {
+		maxDelay = defaultMaxDelaySec
+	}
+	if maxDelay < base {
+		maxDelay = base
+	}
+	return &adaptivePacer{base: base, current: base, max: maxDelay}
+}
+
+func (p *adaptivePacer) Base() float64    { return p.base }
+func (p *adaptivePacer) Current() float64 { return p.current }
+
+func (p *adaptivePacer) OnRateLimit() {
+	p.hits++
+	next := maxFloat(p.current*1.8, p.current+25, defaultBatchDelaySec)
+	p.current = minFloat(next, p.max)
+}
+
+func (p *adaptivePacer) OnSuccess() {
+	if p.hits > 0 {
+		p.hits--
+	}
+	if p.current > p.base {
+		p.current = maxFloat(p.base, p.current*0.92)
+	}
+}
+
+func (p *adaptivePacer) AccountRetryDelay(attempt int) time.Duration {
+	return backoff(p.current, attempt, p.max)
+}
+
+func (p *adaptivePacer) BetweenAccountsDelay() time.Duration {
+	jitterNanos := time.Now().UnixNano() % 11
+	if jitterNanos < 0 {
+		jitterNanos = -jitterNanos
+	}
+	jitter := float64(jitterNanos)
+	return time.Duration((p.current + jitter) * float64(time.Second))
+}
 
 func newHTTPClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
@@ -194,24 +251,61 @@ func doRequest(client *http.Client, method, rawURL string, body io.Reader, heade
 		return 0, "", nil, errDo
 	}
 	defer resp.Body.Close()
-	data, errRead := io.ReadAll(resp.Body)
+	data, errRead := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if errRead != nil {
 		return resp.StatusCode, resp.Request.URL.String(), nil, errRead
+	}
+	if len(data) > 1<<20 {
+		return resp.StatusCode, resp.Request.URL.String(), nil, fmt.Errorf("response body exceeds 1 MiB")
 	}
 	return resp.StatusCode, resp.Request.URL.String(), data, nil
 }
 
 func validateSSO(client *http.Client) error {
-	status, finalURL, body, err := doRequest(client, http.MethodGet, xaiAccountsURL, nil, nil)
+	status, finalURL, _, err := doRequest(client, http.MethodGet, xaiAccountsURL, nil, nil)
 	if err != nil {
 		return fmt.Errorf("validate sso: %w", err)
 	}
-	_ = status
-	low := strings.ToLower(finalURL + " " + string(body))
+	if status >= http.StatusBadRequest {
+		return fmt.Errorf("validate sso HTTP %d", status)
+	}
+	low := strings.ToLower(finalURL)
 	if strings.Contains(low, "sign-in") || strings.Contains(low, "sign-up") {
 		return fmt.Errorf("sso cookie is invalid or expired")
 	}
 	return nil
+}
+
+func requestFreshDevice(client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
+	dc, err := requestDeviceCode(client, maxRetries, baseDelay)
+	if err != nil {
+		return nil, err
+	}
+	verificationURL := firstNonEmpty(dc.VerificationURIComplete, dc.VerificationURI)
+	if verificationURL == "" {
+		return nil, fmt.Errorf("device/code missing verification URI")
+	}
+	status, finalURL, body, err := doRequest(client, http.MethodGet, verificationURL, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open verification URI: %w", err)
+	}
+	if isRateLimited(status, string(body), finalURL) {
+		return nil, &rateLimitedError{msg: fmt.Sprintf("verification URI rate limited HTTP %d", status)}
+	}
+	if status >= http.StatusBadRequest {
+		return nil, fmt.Errorf("open verification URI HTTP %d", status)
+	}
+	return dc, nil
+}
+
+func flowReached(finalURL, destination string) bool {
+	u, err := url.Parse(strings.TrimSpace(finalURL))
+	if err != nil {
+		return false
+	}
+	want := "/" + strings.Trim(strings.ToLower(destination), "/")
+	path := strings.ToLower(strings.TrimRight(u.Path, "/"))
+	return path == want || strings.HasSuffix(path, want) || strings.Contains(path, want+"/")
 }
 
 func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
@@ -276,24 +370,15 @@ func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries in
 			rateHits++
 			time.Sleep(backoff(baseDelay, attempt, 180))
 			// refresh device code
-			fresh, errFresh := requestDeviceCode(client, maxRetries, baseDelay)
+			fresh, errFresh := requestFreshDevice(client, maxRetries, baseDelay)
 			if errFresh != nil {
 				return errFresh
 			}
 			*dc = *fresh
 			continue
 		}
-		if !strings.Contains(strings.ToLower(finalURL+" "+string(body)), "consent") &&
-			status != http.StatusOK && status != http.StatusFound && status < 200 {
-			return fmt.Errorf("verify failed: %s", finalURL)
-		}
-		// Some deployments return 200 HTML with consent; URL may still contain consent.
-		if status >= 400 && !strings.Contains(strings.ToLower(finalURL), "consent") {
-			// try continue if body hints success path; otherwise fail soft on non-consent
-			if !strings.Contains(strings.ToLower(string(body)), "consent") &&
-				!strings.Contains(strings.ToLower(finalURL), "device") {
-				return fmt.Errorf("verify failed HTTP %d: %s", status, trimBody(string(body), 160))
-			}
+		if !flowReached(finalURL, "consent") {
+			return fmt.Errorf("verify did not reach consent (HTTP %d): %s", status, finalURL)
 		}
 
 		// approve
@@ -311,24 +396,17 @@ func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries in
 		if isRateLimited(status, string(body), finalURL) {
 			rateHits++
 			time.Sleep(backoff(baseDelay, attempt, 180))
-			fresh, errFresh := requestDeviceCode(client, maxRetries, baseDelay)
+			fresh, errFresh := requestFreshDevice(client, maxRetries, baseDelay)
 			if errFresh != nil {
 				return errFresh
 			}
 			*dc = *fresh
 			continue
 		}
-		lowURL := strings.ToLower(finalURL + " " + string(body))
-		if strings.Contains(lowURL, "done") || status == http.StatusOK || status == http.StatusFound {
+		if flowReached(finalURL, "done") {
 			return nil
 		}
-		if attempt == maxRetries {
-			if rateHits > 0 {
-				return &rateLimitedError{msg: "approve retries exhausted"}
-			}
-			return fmt.Errorf("approve failed: %s", finalURL)
-		}
-		time.Sleep(backoff(baseDelay, attempt, 60))
+		return fmt.Errorf("approve did not reach done (HTTP %d): %s", status, finalURL)
 	}
 	if rateHits > 0 {
 		return &rateLimitedError{msg: "verify/approve rate limited"}
@@ -360,6 +438,9 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 		status, _, body, err := doRequest(client, http.MethodPost, xaiTokenEndpoint, strings.NewReader(form.Encode()), headers)
 		if err != nil {
 			continue
+		}
+		if isRateLimited(status, string(body), "") && status == http.StatusTooManyRequests {
+			return nil, &rateLimitedError{msg: "token endpoint rate limited"}
 		}
 		var payload struct {
 			Error            string `json:"error"`
@@ -586,23 +667,18 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 		}
 	}
 
-	dc, errDC := requestDeviceCode(client, maxRetries, baseDelay)
+	dc, errDC := requestFreshDevice(client, maxRetries, baseDelay)
 	if errDC != nil {
-		return nil, errDC
-	}
-
-	// Optionally open verification_uri_complete to prime session (best-effort).
-	if uri := strings.TrimSpace(dc.VerificationURIComplete); uri != "" {
-		_, _, _, _ = doRequest(client, http.MethodGet, uri, nil, nil)
+		return nil, fmt.Errorf("device authorization: %w", errDC)
 	}
 
 	if err := verifyAndApprove(client, dc, maxRetries, baseDelay); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("authorize device: %w", err)
 	}
 
 	token, errTok := pollToken(client, dc.DeviceCode, dc.Interval, dc.ExpiresIn, pollTimeoutSec)
 	if errTok != nil {
-		return nil, errTok
+		return nil, fmt.Errorf("exchange token: %w", errTok)
 	}
 
 	email := strings.TrimSpace(opts.Email)
@@ -685,4 +761,24 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func minFloat(values ...float64) float64 {
+	result := values[0]
+	for _, value := range values[1:] {
+		if value < result {
+			result = value
+		}
+	}
+	return result
+}
+
+func maxFloat(values ...float64) float64 {
+	result := values[0]
+	for _, value := range values[1:] {
+		if value > result {
+			result = value
+		}
+	}
+	return result
 }

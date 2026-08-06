@@ -1,9 +1,63 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestXAIScopeIncludesConversationAccess(t *testing.T) {
+	for _, scope := range []string{"openid", "offline_access", "grok-cli:access", "api:access", "conversations:read", "conversations:write"} {
+		if !strings.Contains(xaiScope, scope) {
+			t.Fatalf("scope missing %q: %s", scope, xaiScope)
+		}
+	}
+}
+
+func TestRateLimitedErrorSurvivesStageWrapping(t *testing.T) {
+	err := fmt.Errorf("authorize device: %w", &rateLimitedError{msg: "slow down"})
+	if !isRateLimitedError(err) {
+		t.Fatalf("wrapped rate limit was not recognized: %v", err)
+	}
+	if isRateLimitedError(fmt.Errorf("ordinary failure")) {
+		t.Fatal("ordinary error classified as rate limit")
+	}
+}
+
+func TestAdaptivePacer(t *testing.T) {
+	p := newAdaptivePacer(45, 180)
+	if p.Base() != 45 || p.Current() != 45 {
+		t.Fatalf("initial pacer = base %v current %v", p.Base(), p.Current())
+	}
+	p.OnRateLimit()
+	if p.Current() != 81 {
+		t.Fatalf("first rate limit current = %v, want 81", p.Current())
+	}
+	p.OnRateLimit()
+	if p.Current() != 145.8 {
+		t.Fatalf("second rate limit current = %v, want 145.8", p.Current())
+	}
+	p.OnRateLimit()
+	if p.Current() != 180 {
+		t.Fatalf("pacer should cap at 180, got %v", p.Current())
+	}
+	p.OnSuccess()
+	if p.Current() != 165.6 {
+		t.Fatalf("success recovery = %v, want 165.6", p.Current())
+	}
+}
+
+func TestFlowReachedRequiresDestinationPath(t *testing.T) {
+	if !flowReached("https://auth.x.ai/oauth2/device/consent", "consent") {
+		t.Fatal("consent destination not recognized")
+	}
+	if !flowReached("https://auth.x.ai/oauth2/device/done?code=ok", "done") {
+		t.Fatal("done destination not recognized")
+	}
+	if flowReached("https://auth.x.ai/oauth2/device/verify?next=consent", "consent") {
+		t.Fatal("query text must not count as reaching consent")
+	}
+}
 
 func TestParseSSOList(t *testing.T) {
 	raw := `

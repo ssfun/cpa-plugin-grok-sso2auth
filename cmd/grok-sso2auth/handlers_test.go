@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestPluginRegisterEnvelope(t *testing.T) {
@@ -59,18 +58,13 @@ func TestManagementRegisterRoutes(t *testing.T) {
 	if !strings.Contains(string(env.Result), "\"resources\"") {
 		t.Fatalf("management registration should use documented lowercase resources field: %s", env.Result)
 	}
-	if len(reg.Routes) < 5 {
-		t.Fatalf("routes = %+v", reg.Routes)
+	if len(reg.Routes) != 2 {
+		t.Fatalf("routes = %+v, want convert and convert-import only", reg.Routes)
 	}
-	foundRuntime := false
 	for _, route := range reg.Routes {
-		if route.Path == mgmtAuthRuntimePath {
-			foundRuntime = true
-			break
+		if route.Path != mgmtConvertPath && route.Path != mgmtConvertImportPath {
+			t.Fatalf("unrelated management route remains: %+v", route)
 		}
-	}
-	if !foundRuntime {
-		t.Fatalf("runtime route missing: %+v", reg.Routes)
 	}
 }
 
@@ -98,8 +92,18 @@ func TestManagementUIServesHTML(t *testing.T) {
 	if !strings.Contains(body, "Grok SSO") {
 		t.Fatalf("body missing title, len=%d", len(body))
 	}
-	if !strings.Contains(body, "host.auth.get_runtime") {
-		t.Fatalf("body missing runtime callback documentation, len=%d", len(body))
+	for _, unwanted := range []string{`id="mgmtKey"`, "Auth 文件", "运行时详情", "导入已有 xAI OAuth JSON"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("body still contains removed module %q", unwanted)
+		}
+	}
+	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries"} {
+		if !strings.Contains(body, wanted) {
+			t.Fatalf("body missing %q", wanted)
+		}
+	}
+	if !strings.Contains(body, `[hidden]{display:none!important}`) {
+		t.Fatal("hidden result sections must stay hidden before the first run")
 	}
 	ct := resp.Headers.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
@@ -111,39 +115,6 @@ func TestConvertRequiresSSO(t *testing.T) {
 	status, payload := handleConvert([]byte(`{}`), false)
 	if status == http.StatusOK {
 		t.Fatalf("expected error status, got %d %#v", status, payload)
-	}
-}
-
-func TestImportRequiresXAI(t *testing.T) {
-	status, _ := handleImport([]byte(`{"json":{"type":"gemini","email":"demo@example.com"}}`))
-	if status != http.StatusBadRequest {
-		t.Fatalf("status=%d, want %d", status, http.StatusBadRequest)
-	}
-}
-
-func TestSummarizeAuthOmitsPhysicalPath(t *testing.T) {
-	summary := summarizeAuth(pluginapi.HostAuthFileEntry{
-		AuthIndex: "auth-1",
-		Name:      "xai-demo.json",
-		Type:      "xai",
-		Email:     "demo@example.com",
-		Path:      "/private/auths/xai-demo.json",
-		Status:    "active",
-		Success:   7,
-		Failed:    2,
-		RecentRequests: []pluginapi.HostRecentRequestEntry{{
-			Time: "10:00", Success: 3, Failed: 1,
-		}},
-	})
-	raw, err := json.Marshal(summary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "/private/auths") || strings.Contains(string(raw), "path") {
-		t.Fatalf("summary leaked physical path: %s", raw)
-	}
-	if summary.AuthIndex != "auth-1" || summary.Success != 7 || len(summary.RecentRequests) != 1 {
-		t.Fatalf("summary lost runtime fields: %+v", summary)
 	}
 }
 
@@ -162,5 +133,17 @@ func TestPathMatch(t *testing.T) {
 	}
 	if isResourceUIPath("/v0/resource/plugins/grok-sso2auth/") {
 		t.Fatal("empty resource path should not match a registered route")
+	}
+}
+
+func TestFlagDefaults(t *testing.T) {
+	if got := numberFlag(nil, "missing", 45); got != 45 {
+		t.Fatalf("number default = %v", got)
+	}
+	if got := numberFlag(map[string]any{"n": 7}, "n", 0); got != 7 {
+		t.Fatalf("number int = %v", got)
+	}
+	if got := boolFlag(nil, "missing", true); !got {
+		t.Fatal("validate SSO should default true")
 	}
 }

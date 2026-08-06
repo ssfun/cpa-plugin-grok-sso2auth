@@ -6,7 +6,7 @@
       "name": "Grok SSO Converter",
       "description": "将 Grok/xAI SSO Cookie 转换为 CLIProxyAPI xai OAuth 凭证并导入",
       "author": "sfun",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "repository": "https://github.com/ssfun/cpa-plugin-grok-sso2auth",
       "homepage": "https://github.com/ssfun/cpa-plugin-grok-sso2auth",
       "license": "MIT",

@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.3.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.3.1` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -16,7 +16,7 @@
 
 | 能力 | 说明 |
 |------|------|
-| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；自动复用管理中心认证，无需重复输入 Management Key |
+| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；自动复用管理中心认证与主题，无需重复输入 Management Key |
 | **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `approve` → `token` → `userinfo` |
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
 | **批量** | 多行 SSO / `email----password----sso`，限流时自动提高账号间隔，成功后缓慢回落 |
@@ -67,7 +67,7 @@ checksums.txt                                 # sha256 汇总
 make build
 
 # 打 zip + sha256
-make package VERSION=0.3.0
+make package VERSION=0.3.1
 
 # 安装到默认插件目录
 make install
@@ -108,6 +108,8 @@ curl -H "Authorization: Bearer <management-key>" \
 5. 在结果表中查看每个账号的文件名、尝试次数和限流状态
 
 自动认证依赖插件资源页与管理中心同源，并从管理中心的 `cli-proxy-auth` 持久会话读取认证。若未勾选“记住密码”，请回到管理中心重新登录；插件页面不会再次索要或保存 Management Key。
+
+页面会实时继承上游管理中心的羊毛纸、纯白、暗色和自动主题。独立打开资源页时，则读取 `cli-proxy-theme` 并在自动模式下跟随系统配色。
 
 页面 API 全部走：
 
@@ -186,7 +188,7 @@ POST /v0/management/plugins/grok-sso2auth/convert-import
 本地模拟：
 
 ```bash
-make package VERSION=0.3.0
+make package VERSION=0.3.1
 # 产物在 dist/
 ```
 

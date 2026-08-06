@@ -1,0 +1,23 @@
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.h
+*.o
+*.a
+
+# Release packages live on GitHub Releases, not in git
+*.zip
+checksums.txt
+dist/
+build/
+
+# Local tooling / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Go
+/vendor/

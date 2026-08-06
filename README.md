@@ -220,7 +220,7 @@ go vet ./...
 make build
 ```
 
-核心转换逻辑在 `cmd/grok-sso2auth/sso.go`，可与 `sso2auth.py` 对照。限流时会指数退避并重申 device code。
+核心转换逻辑在 `cmd/grok-sso2auth/sso.go`。限流时会指数退避并重申 device code。
 
 ---
 

@@ -161,6 +161,7 @@ func uiHTML() []byte {
   .notice strong{display:block;margin-bottom:2px}.notice a{color:inherit}
   .progress{display:none;align-items:center;gap:12px;margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft)}.progress.show{display:flex}
   .spinner{width:18px;height:18px;border:2px solid var(--border-strong);border-right-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}.progress strong{display:block}.progress small{color:var(--muted)}
+  .live-progress{margin-bottom:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft);overflow:hidden}.progress-overall{height:4px;background:var(--bg-tertiary)}.progress-overall span{display:block;height:100%;width:0;background:var(--success-color);transition:width .25s ease}.progress-list{display:grid;gap:0}.progress-item{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(200px,1.3fr);gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)}.progress-item:last-child{border-bottom:0}.progress-account{font-weight:650;overflow-wrap:anywhere}.progress-message{color:var(--muted);font-size:12px}.stage-track{display:flex;gap:5px;margin-top:7px}.stage-dot{width:18px;height:4px;border-radius:999px;background:var(--border-primary)}.stage-dot.done{background:var(--success-color)}.stage-dot.active{background:var(--amber-color)}.progress-item.failed .stage-dot.active{background:var(--failure-badge-text)}
   .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric{padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-soft)}
   .metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:2px;font-size:23px;font-variant-numeric:tabular-nums}.metric.ok strong{color:var(--success)}.metric.fail strong{color:var(--danger)}
   .result-placeholder{padding:27px 16px;border:1px dashed var(--border-strong);border-radius:9px;background:var(--surface-soft);color:var(--muted);text-align:center}
@@ -171,7 +172,7 @@ func uiHTML() []byte {
   .footer{margin-top:18px;color:var(--subtle);font-size:12px}.footer a{color:var(--muted)}
   @keyframes spin{to{transform:rotate(360deg)}}
   @media(prefers-reduced-motion:reduce){button{transition:none}.spinner,button.busy::before{animation:none}}
-  @media(max-width:720px){main{padding:22px 14px 36px}.hero{flex-direction:column;gap:14px}.card{padding:18px}.card-head{flex-direction:column}.advanced{grid-template-columns:repeat(2,minmax(0,1fr))}.submit-row{align-items:stretch;flex-direction:column}button{width:100%}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:720px){main{padding:22px 14px 36px}.hero{flex-direction:column;gap:14px}.card{padding:18px}.card-head{flex-direction:column}.advanced{grid-template-columns:repeat(2,minmax(0,1fr))}.submit-row{align-items:stretch;flex-direction:column}button{width:100%}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.progress-item{grid-template-columns:1fr;gap:5px}}
   @media(max-width:420px){.advanced{grid-template-columns:1fr}.summary{grid-template-columns:1fr}.field-meta{flex-direction:column;gap:2px}}
 </style>
 </head>
@@ -228,6 +229,7 @@ func uiHTML() []byte {
       </div>
     </div>
     <div id="progress" class="progress"><span class="spinner"></span><div><strong>正在转换并导入</strong><small id="elapsed">已运行 0 秒，请勿关闭页面</small></div></div>
+    <div id="liveProgress" class="live-progress" hidden><div class="progress-overall"><span id="overallBar"></span></div><div id="progressList" class="progress-list"></div></div>
     <div id="summary" class="summary" hidden>
       <div class="metric"><span>账号总数</span><strong id="totalMetric">0</strong></div>
       <div class="metric ok"><span>成功导入</span><strong id="okMetric">0</strong></div>
@@ -245,7 +247,8 @@ func uiHTML() []byte {
 <script>
 (function(){
   "use strict";
-  const API_URL="/v0/management/plugins/grok-sso2auth/convert-import";
+  const JOB_START_URL="/v0/management/plugins/grok-sso2auth/convert-jobs";
+  const JOB_STATUS_URL="/v0/management/plugins/grok-sso2auth/convert-job-status";
   const AUTH_STORAGE_KEY="cli-proxy-auth";
   const ENCRYPTED_PREFIX="enc::v1::";
   const LEGACY_KEYS=["managementKey","grok_sso2auth.management_key","grok_sso2auth_mgmt_key"];
@@ -306,6 +309,31 @@ func uiHTML() []byte {
     if(busy){state.startedAt=Date.now();state.timer=setInterval(()=>{$("elapsed").textContent="已运行 "+formatDuration((Date.now()-state.startedAt)/1000)+"，请勿关闭页面";},1000);}
     updateButton();
   }
+  const stageOrder=["validate","device_code","authorize","token","userinfo","import","done"];
+  function renderLiveProgress(data){
+    const items=Array.isArray(data.items)?data.items:[];
+    $("liveProgress").hidden=false;
+    const complete=items.filter(item=>item.status==="success"||item.status==="failed").length;
+    $("overallBar").style.width=(items.length?complete/items.length*100:0)+"%";
+    $("progressList").innerHTML=items.map(item=>{
+      let active=item.status==="success"?stageOrder.length:stageOrder.indexOf(item.stage);if(active<0)active=item.status==="queued"?0:Math.max(0,stageOrder.indexOf("authorize"));
+      const dots=stageOrder.map((stage,index)=>'<span class="stage-dot '+(index<active?'done':index===active?'active':'')+'" title="'+escapeHTML(stage)+'"></span>').join("");
+      const label=item.email||("账号 "+item.index);
+      const attempt=item.attempt>1?" · 第 "+item.attempt+" 次尝试":"";
+      return '<div class="progress-item '+(item.status==="failed"?'failed':'')+'"><div><div class="progress-account">'+escapeHTML(label)+'</div><div class="stage-track">'+dots+'</div></div><div><div>'+escapeHTML(item.message||"等待处理")+'</div><div class="progress-message">'+escapeHTML(item.error||item.stage||"")+attempt+'</div></div></div>';
+    }).join("");
+    $("resultCaption").textContent="已完成 "+complete+" / "+items.length+" 个账号；页面会自动刷新进度。";
+  }
+  async function apiRequest(method,url,body,timeoutMs){
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs||30000);
+    try{
+      const response=await fetch(url,{method,headers:{"Authorization":"Bearer "+state.managementKey,...(body?{"Content-Type":"application/json"}:{})},body:body?JSON.stringify(body):undefined,signal:controller.signal});
+      let data={};try{data=await response.json();}catch(_){}
+      if(response.status===401||response.status===403){setSession(false);throw new Error("管理认证已失效。请返回管理中心重新登录并勾选“记住密码”。");}
+      if(!response.ok)throw new Error(data.error||("请求失败（HTTP "+response.status+"）"));
+      return data;
+    }finally{clearTimeout(timer);}
+  }
   function renderResult(data){
     const items=Array.isArray(data.items)?data.items:[];
     $("summary").hidden=false;$("placeholder").hidden=true;$("tableWrap").classList.add("show");
@@ -334,17 +362,18 @@ func uiHTML() []byte {
       max_retries:Math.round(numberValue("stageRetries",8,1,20)),account_retries:Math.round(numberValue("accountRetries",3,1,10))
     };
     setBusy(true);$("placeholder").className="result-placeholder";
-    const controller=new AbortController();
-    const timeout=Math.max(180000,lines.length*120000+Math.max(0,lines.length-1)*payload.max_delay_sec*1000);
-    const timer=setTimeout(()=>controller.abort(),timeout);
     try{
-      const response=await fetch(API_URL,{method:"POST",headers:{"Authorization":"Bearer "+state.managementKey,"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
-      let data={};try{data=await response.json();}catch(_){}
-      if(response.status===401||response.status===403){setSession(false);throw new Error("管理认证已失效。请返回管理中心重新登录并勾选“记住密码”。");}
-      if(!response.ok&&!(data&&Array.isArray(data.items)))throw new Error(data.error||("请求失败（HTTP "+response.status+"）"));
+      $("liveProgress").hidden=true;
+      const started=await apiRequest("POST",JOB_START_URL,payload,30000);
+      let data;
+      do{
+        await new Promise(resolve=>setTimeout(resolve,700));
+        data=await apiRequest("GET",JOB_STATUS_URL+"?job_id="+encodeURIComponent(started.job_id),null,30000);
+        renderLiveProgress(data);
+      }while(!data.done);
       renderResult(data);
     }catch(error){renderRequestError(error&&error.name==="AbortError"?"处理超时。可减少账号数量后重试。":(error.message||String(error)));}
-    finally{clearTimeout(timer);setBusy(false);}
+    finally{setBusy(false);}
   }
   $("ssoInput").addEventListener("input",updateInput);
   ["baseDelay","maxDelay","stageRetries","accountRetries"].forEach(id=>$(id).addEventListener("input",updateInput));

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,6 +27,8 @@ const (
 	// Management API paths (relative; host mounts under /v0/management).
 	mgmtConvertPath       = "/plugins/grok-sso2auth/convert"
 	mgmtConvertImportPath = "/plugins/grok-sso2auth/convert-import"
+	mgmtJobStartPath      = "/plugins/grok-sso2auth/convert-jobs"
+	mgmtJobStatusPath     = "/plugins/grok-sso2auth/convert-job-status"
 
 	defaultBatchDelaySec  = 45.0
 	defaultMaxDelaySec    = 180.0
@@ -33,7 +36,7 @@ const (
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.3.3"
+var pluginVersion = "0.3.5"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -68,6 +71,7 @@ type managementRequest struct {
 	Method         string      `json:"Method"`
 	Path           string      `json:"Path"`
 	Headers        http.Header `json:"Headers"`
+	Query          url.Values  `json:"Query"`
 	Body           []byte      `json:"Body"`
 	HostCallbackID string      `json:"host_callback_id,omitempty"`
 }
@@ -125,6 +129,8 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			Routes: []managementRoute{
 				{Method: http.MethodPost, Path: mgmtConvertPath, Description: "SSO → xai auth JSON（不写入）"},
 				{Method: http.MethodPost, Path: mgmtConvertImportPath, Description: "SSO → xai auth JSON 并 host.auth.save 导入"},
+				{Method: http.MethodPost, Path: mgmtJobStartPath, Description: "启动可观测的 SSO 转换任务"},
+				{Method: http.MethodGet, Path: mgmtJobStatusPath, Description: "查询转换任务进度并写入已完成凭证"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -212,6 +218,12 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
 	p := strings.TrimSpace(req.Path)
+	if parsed, err := url.Parse(p); err == nil && parsed.RawQuery != "" {
+		p = parsed.Path
+		if req.Query == nil {
+			req.Query = parsed.Query()
+		}
+	}
 
 	// Resource UI (unauthenticated page delivery).
 	if method == http.MethodGet && isResourceUIPath(p) {
@@ -224,6 +236,10 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(jsonAPIResponse(handleConvert(req.Body, false)))
 	case method == http.MethodPost && pathMatch(p, mgmtConvertImportPath):
 		return okEnvelope(jsonAPIResponse(handleConvert(req.Body, true)))
+	case method == http.MethodPost && pathMatch(p, mgmtJobStartPath):
+		return okEnvelope(jsonAPIResponse(startConversionJob(req.Body)))
+	case method == http.MethodGet && pathMatch(p, mgmtJobStatusPath):
+		return okEnvelope(jsonAPIResponse(pollConversionJob(req.Query.Get("job_id"))))
 	default:
 		body, _ := json.Marshal(map[string]any{
 			"error":  "not_found",

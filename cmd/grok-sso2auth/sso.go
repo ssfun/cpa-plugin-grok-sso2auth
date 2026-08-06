@@ -69,6 +69,18 @@ type ConvertOptions struct {
 	MaxRetries     int
 	BaseDelaySec   float64
 	PollTimeoutSec int
+	Progress       func(ConversionProgress)
+}
+
+type ConversionProgress struct {
+	Stage   string `json:"stage"`
+	Message string `json:"message"`
+}
+
+func reportProgress(opts ConvertOptions, stage, message string) {
+	if opts.Progress != nil {
+		opts.Progress(ConversionProgress{Stage: stage, Message: message})
+	}
 }
 
 // ConvertResult is one successful conversion.
@@ -159,30 +171,38 @@ func newHTTPClient() *http.Client {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
 			}
-			// Keep cookies across redirects; default client already does via Jar.
+			if !safeXAIURL(req.URL.String()) {
+				return fmt.Errorf("xAI OAuth redirected to an untrusted host")
+			}
 			return nil
 		},
 	}
 }
 
+func safeXAIURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "x.ai" || strings.HasSuffix(host, ".x.ai")
+}
+
 func setSSOCookie(client *http.Client, sso string) {
 	sso = strings.TrimSpace(sso)
 	u, _ := url.Parse("https://x.ai/")
-	client.Jar.SetCookies(u, []*http.Cookie{{
-		Name:   "sso",
-		Value:  sso,
-		Domain: ".x.ai",
-		Path:   "/",
-	}})
+	client.Jar.SetCookies(u, ssoCookies(sso))
 	// Also set for auth.x.ai / accounts.x.ai hosts explicitly.
 	for _, host := range []string{"https://auth.x.ai/", "https://accounts.x.ai/"} {
 		hu, _ := url.Parse(host)
-		client.Jar.SetCookies(hu, []*http.Cookie{{
-			Name:   "sso",
-			Value:  sso,
-			Domain: ".x.ai",
-			Path:   "/",
-		}})
+		client.Jar.SetCookies(hu, ssoCookies(sso))
+	}
+}
+
+func ssoCookies(sso string) []*http.Cookie {
+	return []*http.Cookie{
+		{Name: "sso", Value: sso, Domain: ".x.ai", Path: "/"},
+		{Name: "sso-rw", Value: sso, Domain: ".x.ai", Path: "/"},
 	}
 }
 
@@ -195,15 +215,23 @@ func chromeHeaders() http.Header {
 }
 
 func isRateLimited(status int, body, loc string) bool {
-	blob := strings.ToLower(body + "\n" + loc)
 	if status == http.StatusTooManyRequests {
 		return true
 	}
-	for _, needle := range []string{
-		"rate_limited", "rate-limited", "too_many_requests", "too many",
-		"ratelimit", "slow_down",
-	} {
-		if strings.Contains(blob, needle) {
+	if parsed, err := url.Parse(strings.TrimSpace(loc)); err == nil {
+		location := strings.ToLower(parsed.Path + "?" + parsed.RawQuery)
+		for _, needle := range []string{"rate_limited", "rate-limited", "too_many_requests", "ratelimit"} {
+			if strings.Contains(location, needle) {
+				return true
+			}
+		}
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &payload) == nil {
+		switch strings.ToLower(strings.TrimSpace(payload.Error)) {
+		case "rate_limited", "too_many_requests", "slow_down":
 			return true
 		}
 	}
@@ -251,12 +279,12 @@ func doRequest(client *http.Client, method, rawURL string, body io.Reader, heade
 		return 0, "", nil, errDo
 	}
 	defer resp.Body.Close()
-	data, errRead := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	data, errRead := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
 	if errRead != nil {
 		return resp.StatusCode, resp.Request.URL.String(), nil, errRead
 	}
-	if len(data) > 1<<20 {
-		return resp.StatusCode, resp.Request.URL.String(), nil, fmt.Errorf("response body exceeds 1 MiB")
+	if len(data) > 2<<20 {
+		return resp.StatusCode, resp.Request.URL.String(), nil, fmt.Errorf("response body exceeds 2 MiB")
 	}
 	return resp.StatusCode, resp.Request.URL.String(), data, nil
 }
@@ -266,11 +294,8 @@ func validateSSO(client *http.Client) error {
 	if err != nil {
 		return fmt.Errorf("validate sso: %w", err)
 	}
-	if status >= http.StatusBadRequest {
-		return fmt.Errorf("validate sso HTTP %d", status)
-	}
 	low := strings.ToLower(finalURL)
-	if strings.Contains(low, "sign-in") || strings.Contains(low, "sign-up") {
+	if status == http.StatusUnauthorized || strings.Contains(low, "sign-in") || strings.Contains(low, "sign-up") {
 		return fmt.Errorf("sso cookie is invalid or expired")
 	}
 	return nil
@@ -284,6 +309,9 @@ func requestFreshDevice(client *http.Client, maxRetries int, baseDelay float64) 
 	verificationURL := firstNonEmpty(dc.VerificationURIComplete, dc.VerificationURI)
 	if verificationURL == "" {
 		return nil, fmt.Errorf("device/code missing verification URI")
+	}
+	if !safeXAIURL(verificationURL) {
+		return nil, fmt.Errorf("device/code returned an untrusted verification URI")
 	}
 	status, finalURL, body, err := doRequest(client, http.MethodGet, verificationURL, nil, nil)
 	if err != nil {
@@ -427,7 +455,6 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 	deadline := time.Now().Add(time.Duration(min(expiresIn, timeoutSec)) * time.Second)
 	interval := time.Duration(intervalSec) * time.Second
 	for time.Now().Before(deadline) {
-		time.Sleep(interval)
 		form := url.Values{
 			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 			"client_id":   {xaiClientID},
@@ -437,6 +464,7 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 		headers.Set("Content-Type", "application/x-www-form-urlencoded")
 		status, _, body, err := doRequest(client, http.MethodPost, xaiTokenEndpoint, strings.NewReader(form.Encode()), headers)
 		if err != nil {
+			time.Sleep(interval)
 			continue
 		}
 		if isRateLimited(status, string(body), "") && status == http.StatusTooManyRequests {
@@ -452,14 +480,17 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 			ExpiresIn        int    `json:"expires_in"`
 		}
 		if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
+			time.Sleep(interval)
 			continue
 		}
 		if payload.Error != "" {
 			switch payload.Error {
 			case "authorization_pending":
+				time.Sleep(interval)
 				continue
 			case "slow_down":
 				interval += 5 * time.Second
+				time.Sleep(interval)
 				continue
 			default:
 				return nil, fmt.Errorf("token: %s %s", payload.Error, payload.ErrorDescription)
@@ -662,20 +693,24 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 	setSSOCookie(client, sso)
 
 	if opts.ValidateSSO {
+		reportProgress(opts, "validate", "正在验证 SSO 登录状态")
 		if err := validateSSO(client); err != nil {
 			return nil, err
 		}
 	}
 
+	reportProgress(opts, "device_code", "正在申请 Device Code")
 	dc, errDC := requestFreshDevice(client, maxRetries, baseDelay)
 	if errDC != nil {
 		return nil, fmt.Errorf("device authorization: %w", errDC)
 	}
 
+	reportProgress(opts, "authorize", "正在自动验证并批准授权")
 	if err := verifyAndApprove(client, dc, maxRetries, baseDelay); err != nil {
 		return nil, fmt.Errorf("authorize device: %w", err)
 	}
 
+	reportProgress(opts, "token", "正在兑换 OAuth Token")
 	token, errTok := pollToken(client, dc.DeviceCode, dc.Interval, dc.ExpiresIn, pollTimeoutSec)
 	if errTok != nil {
 		return nil, fmt.Errorf("exchange token: %w", errTok)
@@ -683,6 +718,7 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 
 	email := strings.TrimSpace(opts.Email)
 	if email == "" {
+		reportProgress(opts, "userinfo", "正在读取账号信息")
 		email = fetchUserinfoEmail(client, token.AccessToken)
 	}
 	token.Email = email
@@ -691,6 +727,7 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 	}
 
 	name, auth := tokenToAuthFile(token, email)
+	reportProgress(opts, "converted", "OAuth 凭证转换完成")
 	return &ConvertResult{
 		FileName: name,
 		Email:    auth.Email,

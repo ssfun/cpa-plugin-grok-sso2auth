@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.3.3` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.3.5` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -21,6 +21,7 @@
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
 | **批量** | 多行 SSO / `email----password----sso`，限流时自动提高账号间隔，成功后缓慢回落 |
 | **可靠性** | 默认验证 SSO；阶段重试、账号级限流重跑、重新申请并打开 Device Code |
+| **实时进度** | 页面逐账号显示 SSO 校验、Device Code、授权、Token、用户信息和导入阶段 |
 | **CLI 标志** | `--grok-sso-cookie` / `--grok-sso-file` 等 |
 
 ---
@@ -67,7 +68,7 @@ checksums.txt                                 # sha256 汇总
 make build
 
 # 打 zip + sha256
-make package VERSION=0.3.3
+make package VERSION=0.3.5
 
 # 安装到默认插件目录
 make install
@@ -116,6 +117,8 @@ curl -H "Authorization: Bearer <management-key>" \
 ```text
 POST /v0/management/plugins/grok-sso2auth/convert
 POST /v0/management/plugins/grok-sso2auth/convert-import
+POST /v0/management/plugins/grok-sso2auth/convert-jobs
+GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
 ```
 
 ### 4. 命令行标志
@@ -188,7 +191,7 @@ POST /v0/management/plugins/grok-sso2auth/convert-import
 本地模拟：
 
 ```bash
-make package VERSION=0.3.3
+make package VERSION=0.3.5
 # 产物在 dist/
 ```
 
@@ -222,7 +225,7 @@ go vet ./...
 make build
 ```
 
-核心转换逻辑在 `cmd/grok-sso2auth/sso.go`。Device / Verify / Approve 分阶段重试；Verify 或 Approve 限流后会重新申请并再次打开 Device Code。批量间隔默认 45 秒，限流时按 `max(current×1.8, current+25, 45)` 提升（最高 180 秒），成功后按 `current×0.92` 缓慢回落，并加入 0–10 秒抖动。
+核心转换逻辑在 `cmd/grok-sso2auth/sso.go`，SSO → Build 流程参考 `codex2api`：同时携带 `sso` / `sso-rw`，只把 HTTP 429、明确限流跳转或结构化 OAuth 错误识别为限流，不扫描正常 verification HTML。Device / Verify / Approve 分阶段重试；Verify 或 Approve 限流后会重新申请并再次打开 Device Code。批量间隔默认 45 秒，限流时按 `max(current×1.8, current+25, 45)` 提升（最高 180 秒），成功后按 `current×0.92` 缓慢回落，并加入 0–10 秒抖动。
 
 ---
 

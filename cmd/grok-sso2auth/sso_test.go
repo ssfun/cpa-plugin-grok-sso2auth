@@ -24,6 +24,29 @@ func TestRateLimitedErrorSurvivesStageWrapping(t *testing.T) {
 	}
 }
 
+func TestRateLimitDetectionDoesNotScanSuccessfulHTML(t *testing.T) {
+	html := `<html><script>const messages = ["too many requests", "slow_down", "rate_limited"]</script></html>`
+	if isRateLimited(200, html, "https://auth.x.ai/oauth2/device") {
+		t.Fatal("successful verification HTML must not be classified as rate limited")
+	}
+	if !isRateLimited(429, "", "https://auth.x.ai/oauth2/device") {
+		t.Fatal("HTTP 429 must be classified as rate limited")
+	}
+	if !isRateLimited(400, `{"error":"slow_down"}`, "") {
+		t.Fatal("structured OAuth slow_down must be classified as rate limited")
+	}
+	if !isRateLimited(302, "", "https://auth.x.ai/oauth2/rate_limited") {
+		t.Fatal("explicit rate-limit redirect must be classified as rate limited")
+	}
+}
+
+func TestSSOCookiesIncludeReadWriteVariant(t *testing.T) {
+	cookies := ssoCookies("token")
+	if len(cookies) != 2 || cookies[0].Name != "sso" || cookies[1].Name != "sso-rw" {
+		t.Fatalf("cookies = %+v", cookies)
+	}
+}
+
 func TestAdaptivePacer(t *testing.T) {
 	p := newAdaptivePacer(45, 180)
 	if p.Base() != 45 || p.Current() != 45 {

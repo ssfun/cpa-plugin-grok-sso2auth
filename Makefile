@@ -1,5 +1,5 @@
 PLUGIN_ID := grok-sso2auth
-VERSION   ?= 0.3.3
+VERSION   ?= 0.3.5
 DIST      := dist
 CMD       := ./cmd/$(PLUGIN_ID)
 

@@ -58,11 +58,11 @@ func TestManagementRegisterRoutes(t *testing.T) {
 	if !strings.Contains(string(env.Result), "\"resources\"") {
 		t.Fatalf("management registration should use documented lowercase resources field: %s", env.Result)
 	}
-	if len(reg.Routes) != 2 {
-		t.Fatalf("routes = %+v, want convert and convert-import only", reg.Routes)
+	if len(reg.Routes) != 4 {
+		t.Fatalf("routes = %+v, want sync and observable job routes", reg.Routes)
 	}
 	for _, route := range reg.Routes {
-		if route.Path != mgmtConvertPath && route.Path != mgmtConvertImportPath {
+		if route.Path != mgmtConvertPath && route.Path != mgmtConvertImportPath && route.Path != mgmtJobStartPath && route.Path != mgmtJobStatusPath {
 			t.Fatalf("unrelated management route remains: %+v", route)
 		}
 	}
@@ -121,6 +121,17 @@ func TestConvertRequiresSSO(t *testing.T) {
 	status, payload := handleConvert([]byte(`{}`), false)
 	if status == http.StatusOK {
 		t.Fatalf("expected error status, got %d %#v", status, payload)
+	}
+}
+
+func TestConversionJobRequiresSSO(t *testing.T) {
+	status, _ := startConversionJob([]byte(`{"sso":""}`))
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", status, http.StatusBadRequest)
+	}
+	status, _ = pollConversionJob("missing")
+	if status != http.StatusNotFound {
+		t.Fatalf("missing job status=%d, want %d", status, http.StatusNotFound)
 	}
 }
 

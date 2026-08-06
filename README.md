@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.1.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.2.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -16,7 +16,7 @@
 
 | 能力 | 说明 |
 |------|------|
-| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」 |
+| **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；转换、导入、auth 列表、运行时详情 |
 | **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `approve` → `token` → `userinfo` |
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
 | **批量** | 多行 SSO / `email----password----sso`，账号间可配置间隔 |
@@ -66,7 +66,7 @@ checksums.txt                                 # sha256 汇总
 make build
 
 # 打 zip + sha256
-make package VERSION=0.1.0
+make package VERSION=0.2.0
 
 # 安装到默认插件目录
 make install
@@ -90,7 +90,7 @@ plugins:
 重启或热加载后，管理中心应出现菜单 **「Grok SSO 导入」**，资源页：
 
 ```text
-/v0/resource/plugins/grok-sso2auth/
+/v0/resource/plugins/grok-sso2auth/status
 ```
 
 也可用管理 API 确认：
@@ -102,18 +102,21 @@ curl -H "Authorization: Bearer <management-key>" \
 
 ### 3. 使用管理 UI
 
-1. 打开管理中心 → **Grok SSO 导入**
-2. 填写 Management Key（同源时会尝试从 localStorage 读取）
+1. 打开管理中心 → **Grok SSO 导入**，页面地址为 `/v0/resource/plugins/grok-sso2auth/status`
+2. 填写 Management Key；页面只保存本插件自己的 localStorage 项
 3. 粘贴 SSO Cookie（或 `email----sso` 多行）
-4. **仅转换** 或 **转换并导入**
+4. 选择 **仅转换** 或 **转换并导入**
+5. 在 Auth 列表中搜索、按提供商过滤，并按 auth index 查看宿主运行时详情
+6. 也可以展开「导入已有 xAI OAuth JSON」，直接调用宿主 `host.auth.save`
 
-写操作全部走：
+页面 API 全部走：
 
 ```text
 POST /v0/management/plugins/grok-sso2auth/convert
 POST /v0/management/plugins/grok-sso2auth/convert-import
 POST /v0/management/plugins/grok-sso2auth/import
 GET  /v0/management/plugins/grok-sso2auth/list
+GET  /v0/management/plugins/grok-sso2auth/auth-runtime?auth_index=<AUTH_INDEX>
 ```
 
 ### 4. 命令行标志
@@ -197,7 +200,8 @@ plugins:
 ## 安全说明
 
 - 插件与宿主**同进程**运行，仅应安装可信来源的构建产物。
-- 管理 UI 的 resource 页本身**不鉴权**；转换 / 导入 / 列表走 `/v0/management/...`，需 Management Key。
+- 管理 UI 的 resource 页本身**不鉴权**；转换 / 导入 / 列表 / 运行时详情走 `/v0/management/...`，需 Management Key。
+- 列表和运行时详情只返回 `host.auth.list` / `host.auth.get_runtime` 的安全摘要，不返回物理路径和凭证 JSON；完整转换 JSON 只有手动勾选后才在页面展示。
 - 不要把 SSO、access/refresh token 打进日志或 resource HTML。
 - 本仓库源码与 CI **不包含**任何真实密钥。
 

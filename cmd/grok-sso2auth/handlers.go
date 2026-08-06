@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -21,16 +20,20 @@ const (
 	pluginAuthor = "sfun"
 	pluginRepo   = "https://github.com/ssfun/cpa-plugin-grok-sso2auth"
 
-	resourceUIPath = "/"
+	// Resource paths are normalized by the CLIProxyAPI host and must not be
+	// empty after trimming the trailing slash. Keep the page on a named route
+	// instead of registering "/", which the host rejects.
+	resourceUIPath = "/status"
 	// Management API paths (relative; host mounts under /v0/management).
 	mgmtConvertPath       = "/plugins/grok-sso2auth/convert"
 	mgmtConvertImportPath = "/plugins/grok-sso2auth/convert-import"
 	mgmtImportPath        = "/plugins/grok-sso2auth/import"
 	mgmtListPath          = "/plugins/grok-sso2auth/list"
+	mgmtAuthRuntimePath   = "/plugins/grok-sso2auth/auth-runtime"
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.1.0"
+var pluginVersion = "0.2.0"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -44,21 +47,21 @@ type regCapabilities struct {
 }
 
 type managementRegistration struct {
-	Routes    []managementRoute    `json:"Routes,omitempty"`
-	Resources []managementResource `json:"Resources,omitempty"`
+	Routes    []managementRoute    `json:"routes,omitempty"`
+	Resources []managementResource `json:"resources,omitempty"`
 }
 
 type managementRoute struct {
-	Method      string `json:"Method"`
-	Path        string `json:"Path"`
-	Menu        string `json:"Menu,omitempty"`
-	Description string `json:"Description,omitempty"`
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Menu        string `json:"menu,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type managementResource struct {
-	Path        string `json:"Path"`
-	Menu        string `json:"Menu"`
-	Description string `json:"Description"`
+	Path        string `json:"path"`
+	Menu        string `json:"menu"`
+	Description string `json:"description"`
 }
 
 type managementRequest struct {
@@ -106,11 +109,11 @@ type batchItemResult struct {
 }
 
 type batchResponse struct {
-	OK     int              `json:"ok"`
-	Fail   int              `json:"fail"`
-	Total  int              `json:"total"`
-	Items  []batchItemResult `json:"items"`
-	Message string          `json:"message,omitempty"`
+	OK      int               `json:"ok"`
+	Fail    int               `json:"fail"`
+	Total   int               `json:"total"`
+	Items   []batchItemResult `json:"items"`
+	Message string            `json:"message,omitempty"`
 }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
@@ -129,6 +132,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 				{Method: http.MethodPost, Path: mgmtConvertImportPath, Description: "SSO → xai auth JSON 并 host.auth.save 导入"},
 				{Method: http.MethodPost, Path: mgmtImportPath, Description: "直接导入已有 xai auth JSON"},
 				{Method: http.MethodGet, Path: mgmtListPath, Description: "列出当前 auth 文件"},
+				{Method: http.MethodGet, Path: mgmtAuthRuntimePath, Description: "读取指定 auth 的运行时摘要"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -226,6 +230,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(jsonAPIResponse(handleImport(req.Body)))
 	case method == http.MethodGet && pathMatch(p, mgmtListPath):
 		return okEnvelope(jsonAPIResponse(handleList()))
+	case method == http.MethodGet && pathMatch(p, mgmtAuthRuntimePath):
+		return okEnvelope(jsonAPIResponse(handleAuthRuntime(req.Query)))
 	default:
 		body, _ := json.Marshal(map[string]any{
 			"error":  "not_found",
@@ -243,17 +249,13 @@ func handleManagement(raw []byte) ([]byte, error) {
 func isResourceUIPath(p string) bool {
 	p = strings.TrimRight(p, "/")
 	if p == "" {
-		return true
+		return false
 	}
-	// Full: /v0/resource/plugins/grok-sso2auth or .../grok-sso2auth/
-	if strings.HasSuffix(p, "/v0/resource/plugins/"+pluginID) {
-		return true
-	}
-	if strings.HasSuffix(p, "/plugins/"+pluginID) {
-		return true
-	}
-	base := path.Base(p)
-	return base == pluginID || base == "" || base == "index.html"
+	// Full: /v0/resource/plugins/grok-sso2auth/status or the legacy
+	// relative form /plugins/grok-sso2auth/status.
+	return strings.HasSuffix(p, "/v0/resource/plugins/"+pluginID+resourceUIPath) ||
+		strings.HasSuffix(p, "/plugins/"+pluginID+resourceUIPath) ||
+		p == resourceUIPath
 }
 
 func pathMatch(full, rel string) bool {
@@ -380,15 +382,20 @@ func handleImport(body []byte) (int, any) {
 	if len(req.JSON) == 0 || string(req.JSON) == "null" {
 		return http.StatusBadRequest, map[string]string{"error": "json is required"}
 	}
+	var probe struct {
+		Email string `json:"email"`
+		Sub   string `json:"sub"`
+		Type  string `json:"type"`
+	}
+	if err := json.Unmarshal(req.JSON, &probe); err != nil {
+		return http.StatusBadRequest, map[string]string{"error": "invalid auth json: " + err.Error()}
+	}
+	if !strings.EqualFold(strings.TrimSpace(probe.Type), "xai") {
+		return http.StatusBadRequest, map[string]string{"error": "auth json type must be xai"}
+	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		// derive from payload
-		var probe struct {
-			Email string `json:"email"`
-			Sub   string `json:"sub"`
-			Type  string `json:"type"`
-		}
-		_ = json.Unmarshal(req.JSON, &probe)
 		name = credentialFileName(probe.Email, probe.Sub)
 	}
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
@@ -416,21 +423,117 @@ func handleList() (int, any) {
 	if err := json.Unmarshal(result, &list); err != nil {
 		return http.StatusBadGateway, map[string]string{"error": "decode list: " + err.Error()}
 	}
-	// Strip sensitive runtime fields — only return summary for UI.
-	summaries := make([]map[string]any, 0, len(list.Files))
+	// Strip sensitive runtime fields such as physical paths. The host callback
+	// intentionally exposes a richer entry than a browser list needs.
+	summaries := make([]authSummary, 0, len(list.Files))
 	for _, f := range list.Files {
-		summaries = append(summaries, map[string]any{
-			"name":       f.Name,
-			"type":       f.Type,
-			"provider":   f.Provider,
-			"label":      f.Label,
-			"status":     f.Status,
-			"disabled":   f.Disabled,
-			"auth_index": f.AuthIndex,
-			"email":      f.Email,
-		})
+		summaries = append(summaries, summarizeAuth(f))
 	}
 	return http.StatusOK, map[string]any{"files": summaries, "count": len(summaries)}
+}
+
+// authSummary is the safe browser-facing subset of pluginapi.HostAuthFileEntry.
+// In particular, it omits Path and any credential JSON returned by host.auth.get.
+type authSummary struct {
+	ID             string                 `json:"id,omitempty"`
+	AuthIndex      string                 `json:"auth_index,omitempty"`
+	Name           string                 `json:"name"`
+	Type           string                 `json:"type,omitempty"`
+	Provider       string                 `json:"provider,omitempty"`
+	Label          string                 `json:"label,omitempty"`
+	Status         string                 `json:"status,omitempty"`
+	StatusMessage  string                 `json:"status_message,omitempty"`
+	Disabled       bool                   `json:"disabled,omitempty"`
+	Unavailable    bool                   `json:"unavailable,omitempty"`
+	RuntimeOnly    bool                   `json:"runtime_only,omitempty"`
+	Source         string                 `json:"source,omitempty"`
+	Size           int64                  `json:"size,omitempty"`
+	ModTime        time.Time              `json:"modtime,omitempty"`
+	UpdatedAt      time.Time              `json:"updated_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at,omitempty"`
+	LastRefresh    time.Time              `json:"last_refresh,omitempty"`
+	NextRetryAfter time.Time              `json:"next_retry_after,omitempty"`
+	Email          string                 `json:"email,omitempty"`
+	ProjectID      string                 `json:"project_id,omitempty"`
+	AccountType    string                 `json:"account_type,omitempty"`
+	Account        string                 `json:"account,omitempty"`
+	Priority       int                    `json:"priority,omitempty"`
+	Note           string                 `json:"note,omitempty"`
+	Websockets     bool                   `json:"websockets,omitempty"`
+	Success        int64                  `json:"success,omitempty"`
+	Failed         int64                  `json:"failed,omitempty"`
+	RecentRequests []recentRequestSummary `json:"recent_requests,omitempty"`
+}
+
+type recentRequestSummary struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
+}
+
+func summarizeAuth(f pluginapi.HostAuthFileEntry) authSummary {
+	result := authSummary{
+		ID:             f.ID,
+		AuthIndex:      f.AuthIndex,
+		Name:           f.Name,
+		Type:           f.Type,
+		Provider:       f.Provider,
+		Label:          f.Label,
+		Status:         f.Status,
+		StatusMessage:  f.StatusMessage,
+		Disabled:       f.Disabled,
+		Unavailable:    f.Unavailable,
+		RuntimeOnly:    f.RuntimeOnly,
+		Source:         f.Source,
+		Size:           f.Size,
+		ModTime:        f.ModTime,
+		UpdatedAt:      f.UpdatedAt,
+		CreatedAt:      f.CreatedAt,
+		LastRefresh:    f.LastRefresh,
+		NextRetryAfter: f.NextRetryAfter,
+		Email:          f.Email,
+		ProjectID:      f.ProjectID,
+		AccountType:    f.AccountType,
+		Account:        f.Account,
+		Priority:       f.Priority,
+		Note:           f.Note,
+		Websockets:     f.Websockets,
+		Success:        f.Success,
+		Failed:         f.Failed,
+	}
+	if len(f.RecentRequests) > 0 {
+		result.RecentRequests = make([]recentRequestSummary, 0, len(f.RecentRequests))
+		for _, item := range f.RecentRequests {
+			result.RecentRequests = append(result.RecentRequests, recentRequestSummary{
+				Time: item.Time, Success: item.Success, Failed: item.Failed,
+			})
+		}
+	}
+	return result
+}
+
+func handleAuthRuntime(query url.Values) (int, any) {
+	authIndex := strings.TrimSpace(query.Get("auth_index"))
+	if authIndex == "" {
+		return http.StatusBadRequest, map[string]string{"error": "auth_index is required"}
+	}
+	result, err := callHost(pluginabi.MethodHostAuthGetRuntime, pluginapi.HostAuthGetRequest{
+		AuthIndex: authIndex,
+	})
+	if err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			status = http.StatusNotFound
+		}
+		return status, map[string]string{"error": err.Error()}
+	}
+	var runtimeInfo pluginapi.HostAuthGetRuntimeResponse
+	if err := json.Unmarshal(result, &runtimeInfo); err != nil {
+		return http.StatusBadGateway, map[string]string{"error": "decode runtime info: " + err.Error()}
+	}
+	return http.StatusOK, map[string]any{
+		"auth": summarizeAuth(runtimeInfo.Auth),
+	}
 }
 
 func hostAuthSave(name string, rawJSON json.RawMessage) (pluginapi.HostAuthSaveResponse, error) {
@@ -451,11 +554,11 @@ func hostAuthSave(name string, rawJSON json.RawMessage) (pluginapi.HostAuthSaveR
 // ---- command line ----
 
 type commandLineExecutionRequest struct {
-	Program        string             `json:"Program"`
-	Args           []string           `json:"Args"`
-	ConfigPath     string             `json:"ConfigPath"`
-	Flags          []commandLineFlag  `json:"Flags"`
-	TriggeredFlags []commandLineFlag  `json:"TriggeredFlags"`
+	Program        string            `json:"Program"`
+	Args           []string          `json:"Args"`
+	ConfigPath     string            `json:"ConfigPath"`
+	Flags          []commandLineFlag `json:"Flags"`
+	TriggeredFlags []commandLineFlag `json:"TriggeredFlags"`
 }
 
 type commandLineFlag struct {

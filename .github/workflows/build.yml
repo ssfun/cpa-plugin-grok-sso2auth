@@ -6,6 +6,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '要发布的版本标签（例如 v0.3.6）；留空则只构建，不发布'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +19,45 @@ env:
   PLUGIN_ID: grok-sso2auth
 
 jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      publish: ${{ steps.metadata.outputs.publish }}
+    steps:
+      - name: Resolve build and release metadata
+        id: metadata
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG=""
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${RELEASE_TAG_INPUT}" ]]; then
+            RELEASE_TAG="${RELEASE_TAG_INPUT}"
+          fi
+
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid release tag: ${RELEASE_TAG}" >&2
+              echo "Expected a tag such as v0.3.6 or v0.3.6-rc.1." >&2
+              exit 1
+            fi
+            VERSION="${RELEASE_TAG#v}"
+            PUBLISH="true"
+          else
+            VERSION="0.0.0-dev"
+            PUBLISH="false"
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "publish=${PUBLISH}" >> "${GITHUB_OUTPUT}"
+
   test:
     name: Test
     runs-on: ubuntu-24.04
@@ -35,7 +79,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: test
+    needs:
+      - prepare
+      - test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -77,11 +123,7 @@ jobs:
       - name: Resolve release metadata
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.0.0-dev"
-          fi
+          VERSION="${{ needs.prepare.outputs.version }}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
@@ -115,7 +157,9 @@ jobs:
 
   build-windows-arm64:
     name: Build windows/arm64
-    needs: test
+    needs:
+      - prepare
+      - test
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -134,11 +178,7 @@ jobs:
         id: release_metadata
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.0.0-dev"
-          fi
+          VERSION="${{ needs.prepare.outputs.version }}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
@@ -177,7 +217,9 @@ jobs:
 
   build-freebsd:
     name: Build freebsd/${{ matrix.goarch }}
-    needs: test
+    needs:
+      - prepare
+      - test
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -201,11 +243,7 @@ jobs:
         id: release_metadata
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.0.0-dev"
-          fi
+          VERSION="${{ needs.prepare.outputs.version }}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_freebsd_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
@@ -250,8 +288,9 @@ jobs:
 
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.prepare.outputs.publish == 'true'
     needs:
+      - prepare
       - build
       - build-windows-arm64
       - build-freebsd
@@ -267,15 +306,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           sort dist/*.sha256 > dist/checksums.txt
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
+
+          TAG_EXISTS="false"
+          if TAG_OBJECT="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type + " " + .object.sha' 2>/dev/null)"; then
+            TAG_EXISTS="true"
+            read -r TAG_OBJECT_TYPE TAG_OBJECT_SHA <<< "${TAG_OBJECT}"
+            while [[ "${TAG_OBJECT_TYPE}" == "tag" ]]; do
+              TAG_OBJECT="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_OBJECT_SHA}" --jq '.object.type + " " + .object.sha')"
+              read -r TAG_OBJECT_TYPE TAG_OBJECT_SHA <<< "${TAG_OBJECT}"
+            done
+            if [[ "${RELEASE_EVENT}" == "workflow_dispatch" && "${TAG_OBJECT_SHA}" != "${GITHUB_SHA}" ]]; then
+              echo "Refusing to publish ${RELEASE_TAG}: the existing tag points to ${TAG_OBJECT_SHA}, not this build's ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+          fi
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
+            if [[ "${TAG_EXISTS}" == "true" ]]; then
+              TAG_ARGS=(--verify-tag)
+            else
+              TAG_ARGS=(--target "${GITHUB_SHA}")
+            fi
+            gh release create "${RELEASE_TAG}" dist/*.zip dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "${GITHUB_REF_NAME}" \
-              --notes "Automated release for ${GITHUB_REF_NAME}."
+              "${TAG_ARGS[@]}" \
+              --title "${RELEASE_TAG}" \
+              --notes "Automated release for ${RELEASE_TAG}."
           fi

@@ -55,6 +55,10 @@ grok-sso2auth_<version>_<goos>_<goarch>.zip   # zip 根目录直接是 grok-sso2
 checksums.txt                                 # sha256 汇总
 ```
 
+GitHub Actions 支持两种发布方式：推送 `v*` 标签会自动发布；也可在 Actions
+页面手动运行 `Build`，在 `release_tag` 中填写如 `v0.3.6`。手动发布时若标签
+不存在，工作流会在所选分支的当前提交上创建标签；`release_tag` 留空则只构建。
+
 ---
 
 ## 快速开始

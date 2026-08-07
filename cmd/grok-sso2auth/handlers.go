@@ -30,13 +30,15 @@ const (
 	mgmtJobStartPath      = "/plugins/grok-sso2auth/convert-jobs"
 	mgmtJobStatusPath     = "/plugins/grok-sso2auth/convert-job-status"
 
-	defaultBatchDelaySec  = 45.0
-	defaultMaxDelaySec    = 180.0
-	defaultAccountRetries = 3
+	defaultBatchDelayMinSec = 3.0
+	defaultBatchDelayMaxSec = 15.0
+	defaultMaxDelaySec      = 30.0
+	defaultStageRetries     = 3
+	defaultAccountRetries   = 3
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.3.5"
+var pluginVersion = "0.4.0"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -83,11 +85,14 @@ type managementResponse struct {
 }
 
 type convertRequest struct {
-	SSO            string  `json:"sso"`
-	Email          string  `json:"email,omitempty"`
-	ValidateSSO    *bool   `json:"validate_sso,omitempty"`
-	MaxRetries     int     `json:"max_retries,omitempty"`
-	AccountRetries int     `json:"account_retries,omitempty"`
+	SSO             string  `json:"sso"`
+	Email           string  `json:"email,omitempty"`
+	ValidateSSO     *bool   `json:"validate_sso,omitempty"`
+	MaxRetries      int     `json:"max_retries,omitempty"`
+	AccountRetries  int     `json:"account_retries,omitempty"`
+	BaseDelayMinSec float64 `json:"base_delay_min_sec,omitempty"`
+	BaseDelayMaxSec float64 `json:"base_delay_max_sec,omitempty"`
+	// BaseDelaySec keeps older API and CLI callers working as a fixed interval.
 	BaseDelaySec   float64 `json:"base_delay_sec,omitempty"`
 	MaxDelaySec    float64 `json:"max_delay_sec,omitempty"`
 	PollTimeoutSec int     `json:"poll_timeout_sec,omitempty"`
@@ -105,14 +110,16 @@ type batchItemResult struct {
 }
 
 type batchResponse struct {
-	OK            int               `json:"ok"`
-	Fail          int               `json:"fail"`
-	Total         int               `json:"total"`
-	Items         []batchItemResult `json:"items"`
-	Message       string            `json:"message,omitempty"`
-	Imported      bool              `json:"imported"`
-	BaseDelaySec  float64           `json:"base_delay_sec,omitempty"`
-	FinalDelaySec float64           `json:"final_delay_sec,omitempty"`
+	OK              int               `json:"ok"`
+	Fail            int               `json:"fail"`
+	Total           int               `json:"total"`
+	Items           []batchItemResult `json:"items"`
+	Message         string            `json:"message,omitempty"`
+	Imported        bool              `json:"imported"`
+	BaseDelaySec    float64           `json:"base_delay_sec,omitempty"`
+	BaseDelayMinSec float64           `json:"base_delay_min_sec,omitempty"`
+	BaseDelayMaxSec float64           `json:"base_delay_max_sec,omitempty"`
+	FinalDelaySec   float64           `json:"final_delay_sec,omitempty"`
 }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
@@ -156,21 +163,33 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 				},
 				{
 					"Name":         "grok-sso-delay",
-					"Usage":        "Base seconds between accounts; adaptive pacing starts at 45",
+					"Usage":        "Fixed seconds between accounts (legacy override; default uses a random 3-15 second range)",
 					"Type":         "float64",
-					"DefaultValue": defaultBatchDelaySec,
+					"DefaultValue": 0,
+				},
+				{
+					"Name":         "grok-sso-delay-min",
+					"Usage":        "Minimum random seconds between accounts (default 3)",
+					"Type":         "float64",
+					"DefaultValue": defaultBatchDelayMinSec,
+				},
+				{
+					"Name":         "grok-sso-delay-max",
+					"Usage":        "Maximum random seconds between accounts (default 15)",
+					"Type":         "float64",
+					"DefaultValue": defaultBatchDelayMaxSec,
 				},
 				{
 					"Name":         "grok-sso-max-delay",
-					"Usage":        "Maximum adaptive delay between accounts (default 180)",
+					"Usage":        "Maximum adaptive delay between accounts (default 30)",
 					"Type":         "float64",
 					"DefaultValue": defaultMaxDelaySec,
 				},
 				{
 					"Name":         "grok-sso-retries",
-					"Usage":        "Maximum device/verify/approve retries per account (default 8)",
+					"Usage":        "Maximum device/verify/approve retries per account (default 3)",
 					"Type":         "int",
-					"DefaultValue": 8,
+					"DefaultValue": defaultStageRetries,
 				},
 				{
 					"Name":         "grok-sso-account-retries",
@@ -328,12 +347,12 @@ func handleConvert(body []byte, doImport bool) (int, any) {
 	if accountRetries <= 0 {
 		accountRetries = defaultAccountRetries
 	}
-	pacer := newAdaptivePacer(req.BaseDelaySec, req.MaxDelaySec)
+	pacer := newRequestPacer(req)
 	resp := batchResponse{
 		Total:        len(entries),
 		Items:        make([]batchItemResult, 0, len(entries)),
 		Imported:     doImport,
-		BaseDelaySec: pacer.Base(),
+		BaseDelaySec: pacer.BaseMax(), BaseDelayMinSec: pacer.BaseMin(), BaseDelayMaxSec: pacer.BaseMax(),
 	}
 	for i, ent := range entries {
 		item := batchItemResult{Index: i + 1, Email: ent.Email}
@@ -453,9 +472,11 @@ func handleCommandLine(raw []byte) ([]byte, error) {
 	filePath, _ := flags["grok-sso-file"].(string)
 	email, _ := flags["grok-sso-email"].(string)
 	validate := boolFlag(flags, "grok-sso-validate", true)
-	delay := numberFlag(flags, "grok-sso-delay", defaultBatchDelaySec)
+	delay := numberFlag(flags, "grok-sso-delay", 0)
+	delayMin := numberFlag(flags, "grok-sso-delay-min", defaultBatchDelayMinSec)
+	delayMax := numberFlag(flags, "grok-sso-delay-max", defaultBatchDelayMaxSec)
 	maxDelay := numberFlag(flags, "grok-sso-max-delay", defaultMaxDelaySec)
-	maxRetries := int(numberFlag(flags, "grok-sso-retries", 8))
+	maxRetries := int(numberFlag(flags, "grok-sso-retries", defaultStageRetries))
 	accountRetries := int(numberFlag(flags, "grok-sso-account-retries", defaultAccountRetries))
 
 	var rawSSO string
@@ -473,13 +494,15 @@ func handleCommandLine(raw []byte) ([]byte, error) {
 	}
 
 	body, _ := json.Marshal(convertRequest{
-		SSO:            rawSSO,
-		Email:          email,
-		ValidateSSO:    &validate,
-		BaseDelaySec:   delay,
-		MaxDelaySec:    maxDelay,
-		MaxRetries:     maxRetries,
-		AccountRetries: accountRetries,
+		SSO:             rawSSO,
+		Email:           email,
+		ValidateSSO:     &validate,
+		BaseDelayMinSec: delayMin,
+		BaseDelayMaxSec: delayMax,
+		BaseDelaySec:    delay,
+		MaxDelaySec:     maxDelay,
+		MaxRetries:      maxRetries,
+		AccountRetries:  accountRetries,
 	})
 	status, payload := handleConvert(body, true)
 	pretty, _ := json.MarshalIndent(payload, "", "  ")

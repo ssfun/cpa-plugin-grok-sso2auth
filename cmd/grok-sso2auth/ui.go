@@ -144,6 +144,7 @@ func uiHTML() []byte {
   textarea,input{width:100%;border:1px solid var(--border);border-radius:8px;background:var(--surface-soft);color:var(--text);font:inherit;outline:0;transition:.15s border-color,.15s box-shadow,.15s background}
   textarea{min-height:190px;padding:12px 14px;resize:vertical;font:13px/1.6 var(--mono)} input{height:40px;padding:8px 11px}
   textarea:focus,input:focus{border-color:var(--accent);background:var(--surface-strong);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .input-actions{display:flex;align-items:center;gap:10px;margin:10px 0 0}.file-input{position:absolute;width:1px;height:1px;padding:0;border:0;clip:rect(0,0,0,0);overflow:hidden}.file-name{min-width:0;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .field-meta{display:flex;justify-content:space-between;gap:16px;margin-top:8px;color:var(--muted);font-size:12px}.field-error{color:var(--danger)}
   .format{margin-top:16px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-soft);color:var(--muted);font-size:12px}
   code{font:12px var(--mono);color:var(--text)}
@@ -155,18 +156,19 @@ func uiHTML() []byte {
   .submit-row{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:18px}
   .estimate{color:var(--muted);font-size:13px}.estimate strong{color:var(--text)}
   button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:9px 16px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:var(--primary-contrast);font:600 13px var(--sans);cursor:pointer;transition:.15s background,.15s transform}
+  button.secondary{min-height:34px;padding:6px 11px;border-color:var(--border-strong);background:var(--surface-strong);color:var(--text);font-weight:550}button.secondary:hover:not(:disabled){background:var(--bg-hover)}
   button:hover:not(:disabled){background:var(--accent-hover)}button:active:not(:disabled){transform:scale(.98)}button:disabled{opacity:.5;cursor:not-allowed}
   button.busy::before{content:"";width:14px;height:14px;margin-right:8px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .75s linear infinite}
   .notice{display:none;margin-bottom:16px;padding:12px 14px;border:1px solid var(--warning-border);border-radius:9px;background:var(--warning-bg);color:var(--warning);font-size:13px}.notice.show{display:block}
   .notice strong{display:block;margin-bottom:2px}.notice a{color:inherit}
   .progress{display:none;align-items:center;gap:12px;margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft)}.progress.show{display:flex}
   .spinner{width:18px;height:18px;border:2px solid var(--border-strong);border-right-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}.progress strong{display:block}.progress small{color:var(--muted)}
-  .live-progress{margin-bottom:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft);overflow:hidden}.progress-overall{height:4px;background:var(--bg-tertiary)}.progress-overall span{display:block;height:100%;width:0;background:var(--success-color);transition:width .25s ease}.progress-list{display:grid;gap:0}.progress-item{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(200px,1.3fr);gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)}.progress-item:last-child{border-bottom:0}.progress-account{font-weight:650;overflow-wrap:anywhere}.progress-message{color:var(--muted);font-size:12px}.stage-track{display:flex;gap:5px;margin-top:7px}.stage-dot{width:18px;height:4px;border-radius:999px;background:var(--border-primary)}.stage-dot.done{background:var(--success-color)}.stage-dot.active{background:var(--amber-color)}.progress-item.failed .stage-dot.active{background:var(--failure-badge-text)}
+  .live-progress{margin-bottom:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft);overflow:hidden}.progress-overall{height:4px;background:var(--bg-tertiary)}.progress-overall span{display:block;height:100%;width:0;background:var(--success-color);transition:width .25s ease}.progress-list{display:grid;gap:0;max-height:360px;overflow:auto;overscroll-behavior:contain}.progress-item{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(200px,1.3fr);gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)}.progress-item:last-child{border-bottom:0}.progress-account{font-weight:650;overflow-wrap:anywhere}.progress-message{color:var(--muted);font-size:12px}.stage-track{display:flex;gap:5px;margin-top:7px}.stage-dot{width:18px;height:4px;border-radius:999px;background:var(--border-primary)}.stage-dot.done{background:var(--success-color)}.stage-dot.active{background:var(--amber-color)}.progress-item.failed .stage-dot.active{background:var(--failure-badge-text)}
   .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric{padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-soft)}
   .metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:2px;font-size:23px;font-variant-numeric:tabular-nums}.metric.ok strong{color:var(--success)}.metric.fail strong{color:var(--danger)}
   .result-placeholder{padding:27px 16px;border:1px dashed var(--border-strong);border-radius:9px;background:var(--surface-soft);color:var(--muted);text-align:center}
-  .table-wrap{display:none;overflow:auto;border:1px solid var(--border);border-radius:9px;background:var(--surface-strong)}.table-wrap.show{display:block}
-  table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}th{background:var(--bg-tertiary);color:var(--muted);font-size:12px;font-weight:550;white-space:nowrap}tr:last-child td{border-bottom:0}
+  .table-wrap{display:none;max-height:360px;overflow:auto;overscroll-behavior:contain;border:1px solid var(--border);border-radius:9px;background:var(--surface-strong)}.table-wrap.show{display:block}
+  table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:1;background:var(--bg-tertiary);color:var(--muted);font-size:12px;font-weight:550;white-space:nowrap}tr:last-child td{border-bottom:0}
   .badge{display:inline-flex;padding:3px 8px;border:1px solid transparent;border-radius:999px;font-size:12px;white-space:nowrap}.badge.ok{border-color:var(--success-border);background:var(--success-bg);color:var(--success)}.badge.fail{border-color:var(--danger-border);background:var(--danger-bg);color:var(--danger)}.badge.rate{margin-left:5px;border-color:var(--warning-border);background:var(--warning-bg);color:var(--warning)}
   .account{max-width:230px;overflow-wrap:anywhere}.error{max-width:330px;color:var(--danger);overflow-wrap:anywhere}.muted{color:var(--muted)}
   .footer{margin-top:18px;color:var(--subtle);font-size:12px}.footer a{color:var(--muted)}
@@ -195,21 +197,27 @@ func uiHTML() []byte {
   <section class="card">
     <div class="card-head">
       <div>
-        <div class="title-row"><span class="step">1</span><h2>粘贴 SSO</h2></div>
-        <p>支持单个 Cookie，或一行一个账号的批量列表。</p>
+        <div class="title-row"><span class="step">1</span><h2>添加 SSO</h2></div>
+        <p>支持粘贴单个 Cookie、批量列表，或从本地 TXT 文件导入。</p>
       </div>
     </div>
     <label for="ssoInput">SSO Cookie / 批量列表 <span class="required">*</span></label>
     <textarea id="ssoInput" spellcheck="false" autocomplete="off" placeholder="eyJhbGciOi...&#10;&#10;或：&#10;name@example.com----eyJhbGciOi..."></textarea>
+    <div class="input-actions">
+      <button id="fileButton" class="secondary" type="button">选择 TXT 文件</button>
+      <input id="ssoFile" class="file-input" type="file" accept=".txt,text/plain"/>
+      <span id="fileName" class="file-name">也可以导入本地 .txt 批量列表</span>
+    </div>
     <div class="field-meta"><span id="inputMessage">尚未添加账号</span><span>空行和以 # 开头的行会被忽略</span></div>
     <div class="format">支持格式：<code>sso</code>、<code>email----sso</code>、<code>email----password----sso</code>。密码字段只用于兼容列表格式，不会被读取或上传。</div>
 
     <details>
       <summary>高级设置</summary>
       <div class="advanced">
-        <div><label for="baseDelay">基础间隔（秒）</label><input id="baseDelay" type="number" min="1" max="600" step="1" value="45"/><small>账号之间的起始等待</small></div>
-        <div><label for="maxDelay">最大间隔（秒）</label><input id="maxDelay" type="number" min="30" max="900" step="1" value="180"/><small>限流时的间隔上限</small></div>
-        <div><label for="stageRetries">阶段重试</label><input id="stageRetries" type="number" min="1" max="20" step="1" value="8"/><small>Device / Verify / Approve</small></div>
+        <div><label for="baseDelayMin">基础间隔下限（秒）</label><input id="baseDelayMin" type="number" min="1" max="30" step="1" value="3"/><small>每个账号随机等待的下限</small></div>
+        <div><label for="baseDelayMax">基础间隔上限（秒）</label><input id="baseDelayMax" type="number" min="1" max="30" step="1" value="15"/><small>每个账号随机等待的上限</small></div>
+        <div><label for="maxDelay">最大间隔（秒）</label><input id="maxDelay" type="number" min="30" max="900" step="1" value="30"/><small>限流时的自适应上限</small></div>
+        <div><label for="stageRetries">阶段重试</label><input id="stageRetries" type="number" min="1" max="20" step="1" value="3"/><small>Device / Verify / Approve</small></div>
         <div><label for="accountRetries">账号级尝试</label><input id="accountRetries" type="number" min="1" max="10" step="1" value="3"/><small>仅限流时重跑整个账号</small></div>
         <div class="toggle-row"><input id="validateSSO" type="checkbox" checked/><label for="validateSSO">转换前验证 SSO 是否仍然有效（推荐）</label></div>
       </div>
@@ -291,13 +299,13 @@ func uiHTML() []byte {
   }
   function parsedLines(){return $("ssoInput").value.split(/\r?\n/).map(v=>v.trim()).filter(v=>v&&!v.startsWith("#"));}
   function numberValue(id,fallback,min,max){const n=Number($(id).value);return Number.isFinite(n)?Math.min(max,Math.max(min,n)):fallback;}
+  function delayRange(){const a=numberValue("baseDelayMin",3,1,30),b=numberValue("baseDelayMax",15,1,30);return {min:Math.min(a,b),max:Math.max(a,b)};}
   function updateInput(){
     const count=parsedLines().length;
     $("inputMessage").textContent=count?"已识别 "+count+" 个账号":"尚未添加账号";
     $("inputMessage").className=count?"":"field-error";
-    const base=numberValue("baseDelay",45,1,600);
-    const minimum=Math.max(0,count-1)*base;
-    $("estimate").innerHTML=count?"<strong>"+count+" 个账号</strong> · 批量间最低等待约 "+formatDuration(minimum):"添加账号后显示预计批量等待时间";
+    const range=delayRange(),gaps=Math.max(0,count-1);
+    $("estimate").innerHTML=count?"<strong>"+count+" 个账号</strong> · 批量间预计等待 "+formatDuration(gaps*range.min)+"–"+formatDuration(gaps*range.max):"添加账号后显示预计批量等待时间";
     updateButton();
   }
   function updateButton(){$("startButton").disabled=state.busy||!state.managementKey||parsedLines().length===0;}
@@ -351,15 +359,25 @@ func uiHTML() []byte {
     $("placeholder").className="result-placeholder field-error";$("placeholder").textContent=message;
     $("resultCaption").textContent="请求未完成，请按提示检查后重试。";
   }
+  async function loadTextFile(){
+    const file=$("ssoFile").files&&$("ssoFile").files[0];if(!file)return;
+    if(!/\.txt$/i.test(file.name)){ $("fileName").textContent="请选择 .txt 文件";$("fileName").className="file-name field-error";return; }
+    if(file.size>8*1024*1024){ $("fileName").textContent="文件不能超过 8 MB";$("fileName").className="file-name field-error";return; }
+    try{
+      $("ssoInput").value=(await file.text()).replace(/^\uFEFF/,"");
+      $("fileName").textContent=file.name+" · "+formatFileSize(file.size);$("fileName").className="file-name";updateInput();
+    }catch(_){$("fileName").textContent="无法读取该文件";$("fileName").className="file-name field-error";}
+  }
+  function formatFileSize(bytes){return bytes<1024?bytes+" B":bytes<1024*1024?Math.ceil(bytes/1024)+" KB":(bytes/1024/1024).toFixed(1)+" MB";}
   async function start(){
     if(state.busy)return;
     state.managementKey=loadManagementKey();setSession(Boolean(state.managementKey));
     if(!state.managementKey)return;
     const lines=parsedLines();if(!lines.length){updateInput();return;}
-    const payload={
+    const range=delayRange(),payload={
       sso:$("ssoInput").value,validate_sso:$("validateSSO").checked,
-      base_delay_sec:numberValue("baseDelay",45,1,600),max_delay_sec:numberValue("maxDelay",180,30,900),
-      max_retries:Math.round(numberValue("stageRetries",8,1,20)),account_retries:Math.round(numberValue("accountRetries",3,1,10))
+      base_delay_min_sec:range.min,base_delay_max_sec:range.max,max_delay_sec:numberValue("maxDelay",30,30,900),
+      max_retries:Math.round(numberValue("stageRetries",3,1,20)),account_retries:Math.round(numberValue("accountRetries",3,1,10))
     };
     setBusy(true);$("placeholder").className="result-placeholder";
     try{
@@ -376,7 +394,9 @@ func uiHTML() []byte {
     finally{setBusy(false);}
   }
   $("ssoInput").addEventListener("input",updateInput);
-  ["baseDelay","maxDelay","stageRetries","accountRetries"].forEach(id=>$(id).addEventListener("input",updateInput));
+  ["baseDelayMin","baseDelayMax","maxDelay","stageRetries","accountRetries"].forEach(id=>$(id).addEventListener("input",updateInput));
+  $("fileButton").addEventListener("click",()=>$("ssoFile").click());
+  $("ssoFile").addEventListener("change",loadTextFile);
   $("startButton").addEventListener("click",start);
   state.managementKey=loadManagementKey();setSession(Boolean(state.managementKey));updateInput();
 })();

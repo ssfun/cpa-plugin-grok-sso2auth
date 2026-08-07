@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -112,31 +113,57 @@ func isRateLimitedError(err error) bool {
 }
 
 type adaptivePacer struct {
-	base    float64
+	baseMin float64
+	baseMax float64
 	current float64
 	max     float64
 	hits    int
 }
 
 func newAdaptivePacer(base, maxDelay float64) *adaptivePacer {
-	if base <= 0 {
-		base = defaultBatchDelaySec
+	if base > 0 {
+		return newAdaptivePacerRange(base, base, maxDelay)
 	}
-	if maxDelay < 30 {
-		maxDelay = defaultMaxDelaySec
-	}
-	if maxDelay < base {
-		maxDelay = base
-	}
-	return &adaptivePacer{base: base, current: base, max: maxDelay}
+	return newAdaptivePacerRange(defaultBatchDelayMinSec, defaultBatchDelayMaxSec, maxDelay)
 }
 
-func (p *adaptivePacer) Base() float64    { return p.base }
+func newAdaptivePacerRange(baseMin, baseMax, maxDelay float64) *adaptivePacer {
+	if baseMin <= 0 {
+		baseMin = defaultBatchDelayMinSec
+	}
+	if baseMax <= 0 {
+		baseMax = defaultBatchDelayMaxSec
+	}
+	if baseMax < baseMin {
+		baseMin, baseMax = baseMax, baseMin
+	}
+	if maxDelay <= 0 {
+		maxDelay = defaultMaxDelaySec
+	}
+	if maxDelay < baseMax {
+		maxDelay = baseMax
+	}
+	return &adaptivePacer{baseMin: baseMin, baseMax: baseMax, current: baseMax, max: maxDelay}
+}
+
+func newRequestPacer(req convertRequest) *adaptivePacer {
+	if req.BaseDelaySec > 0 {
+		return newAdaptivePacer(req.BaseDelaySec, req.MaxDelaySec)
+	}
+	if req.BaseDelayMinSec > 0 || req.BaseDelayMaxSec > 0 {
+		return newAdaptivePacerRange(req.BaseDelayMinSec, req.BaseDelayMaxSec, req.MaxDelaySec)
+	}
+	return newAdaptivePacer(0, req.MaxDelaySec)
+}
+
+func (p *adaptivePacer) Base() float64    { return p.baseMax }
+func (p *adaptivePacer) BaseMin() float64 { return p.baseMin }
+func (p *adaptivePacer) BaseMax() float64 { return p.baseMax }
 func (p *adaptivePacer) Current() float64 { return p.current }
 
 func (p *adaptivePacer) OnRateLimit() {
 	p.hits++
-	next := maxFloat(p.current*1.8, p.current+25, defaultBatchDelaySec)
+	next := maxFloat(p.current*1.8, p.current+25, p.baseMax)
 	p.current = minFloat(next, p.max)
 }
 
@@ -144,8 +171,8 @@ func (p *adaptivePacer) OnSuccess() {
 	if p.hits > 0 {
 		p.hits--
 	}
-	if p.current > p.base {
-		p.current = maxFloat(p.base, p.current*0.92)
+	if p.current > p.baseMax {
+		p.current = maxFloat(p.baseMax, p.current*0.92)
 	}
 }
 
@@ -154,12 +181,16 @@ func (p *adaptivePacer) AccountRetryDelay(attempt int) time.Duration {
 }
 
 func (p *adaptivePacer) BetweenAccountsDelay() time.Duration {
-	jitterNanos := time.Now().UnixNano() % 11
-	if jitterNanos < 0 {
-		jitterNanos = -jitterNanos
+	minDelay, maxDelay := p.baseMin, p.baseMax
+	if p.current > p.baseMax {
+		minDelay, maxDelay = p.baseMax, p.current
 	}
-	jitter := float64(jitterNanos)
-	return time.Duration((p.current + jitter) * float64(time.Second))
+	spanMicros := int64((maxDelay - minDelay) * 1_000_000)
+	if spanMicros <= 0 {
+		return time.Duration(minDelay * float64(time.Second))
+	}
+	randomMicros := rand.Int64N(spanMicros + 1)
+	return time.Duration(minDelay*float64(time.Second)) + time.Duration(randomMicros)*time.Microsecond
 }
 
 func newHTTPClient() *http.Client {
@@ -338,7 +369,7 @@ func flowReached(finalURL, destination string) bool {
 
 func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
 	if maxRetries < 1 {
-		maxRetries = 6
+		maxRetries = defaultStageRetries
 	}
 	form := url.Values{
 		"client_id": {xaiClientID},
@@ -381,7 +412,7 @@ func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (
 
 func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries int, baseDelay float64) error {
 	if maxRetries < 1 {
-		maxRetries = 8
+		maxRetries = defaultStageRetries
 	}
 	rateHits := 0
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -678,7 +709,7 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 	}
 	maxRetries := opts.MaxRetries
 	if maxRetries <= 0 {
-		maxRetries = 8
+		maxRetries = defaultStageRetries
 	}
 	baseDelay := opts.BaseDelaySec
 	if baseDelay <= 0 {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestXAIScopeIncludesConversationAccess(t *testing.T) {
@@ -48,25 +49,56 @@ func TestSSOCookiesIncludeReadWriteVariant(t *testing.T) {
 }
 
 func TestAdaptivePacer(t *testing.T) {
-	p := newAdaptivePacer(45, 180)
-	if p.Base() != 45 || p.Current() != 45 {
+	p := newAdaptivePacerRange(3, 15, 30)
+	if p.BaseMin() != 3 || p.BaseMax() != 15 || p.Current() != 15 {
 		t.Fatalf("initial pacer = base %v current %v", p.Base(), p.Current())
 	}
 	p.OnRateLimit()
-	if p.Current() != 81 {
-		t.Fatalf("first rate limit current = %v, want 81", p.Current())
+	if p.Current() != 30 {
+		t.Fatalf("first rate limit current = %v, want 30", p.Current())
 	}
-	p.OnRateLimit()
-	if p.Current() != 145.8 {
-		t.Fatalf("second rate limit current = %v, want 145.8", p.Current())
-	}
-	p.OnRateLimit()
-	if p.Current() != 180 {
-		t.Fatalf("pacer should cap at 180, got %v", p.Current())
+	for range 100 {
+		delay := p.BetweenAccountsDelay()
+		if delay < 15*time.Second || delay > 30*time.Second {
+			t.Fatalf("adaptive random delay %v outside 15-30s", delay)
+		}
 	}
 	p.OnSuccess()
-	if p.Current() != 165.6 {
-		t.Fatalf("success recovery = %v, want 165.6", p.Current())
+	if p.Current() != 27.6 {
+		t.Fatalf("success recovery = %v, want 27.6", p.Current())
+	}
+}
+
+func TestDefaultPacerUsesRandomThreeToFifteenSeconds(t *testing.T) {
+	p := newAdaptivePacer(0, 0)
+	if p.BaseMin() != 3 || p.BaseMax() != 15 || p.max != 30 {
+		t.Fatalf("default pacer = %+v", p)
+	}
+	seenDifferent := false
+	first := p.BetweenAccountsDelay()
+	for range 100 {
+		delay := p.BetweenAccountsDelay()
+		if delay < 3*time.Second || delay > 15*time.Second {
+			t.Fatalf("default random delay %v outside 3-15s", delay)
+		}
+		if delay != first {
+			seenDifferent = true
+		}
+	}
+	if !seenDifferent {
+		t.Fatal("random account delays did not vary")
+	}
+}
+
+func TestRequestPacerKeepsLegacyFixedDelayOverride(t *testing.T) {
+	p := newRequestPacer(convertRequest{
+		BaseDelaySec:    9,
+		BaseDelayMinSec: 3,
+		BaseDelayMaxSec: 15,
+		MaxDelaySec:     30,
+	})
+	if p.BaseMin() != 9 || p.BaseMax() != 9 {
+		t.Fatalf("legacy fixed delay did not override range: %+v", p)
 	}
 }
 

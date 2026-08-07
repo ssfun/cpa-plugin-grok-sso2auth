@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.3.5` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.4.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -19,7 +19,7 @@
 | **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；自动复用管理中心认证与主题，无需重复输入 Management Key |
 | **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `approve` → `token` → `userinfo` |
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
-| **批量** | 多行 SSO / `email----password----sso`，限流时自动提高账号间隔，成功后缓慢回落 |
+| **批量** | 粘贴或上传 TXT；多行 SSO / `email----password----sso`，限流时自动提高账号间隔 |
 | **可靠性** | 默认验证 SSO；阶段重试、账号级限流重跑、重新申请并打开 Device Code |
 | **实时进度** | 页面逐账号显示 SSO 校验、Device Code、授权、Token、用户信息和导入阶段 |
 | **CLI 标志** | `--grok-sso-cookie` / `--grok-sso-file` 等 |
@@ -72,7 +72,7 @@ GitHub Actions 支持两种发布方式：推送 `v*` 标签会自动发布；�
 make build
 
 # 打 zip + sha256
-make package VERSION=0.3.5
+make package VERSION=0.4.0
 
 # 安装到默认插件目录
 make install
@@ -108,7 +108,7 @@ curl -H "Authorization: Bearer <management-key>" \
 
 1. 登录管理中心时勾选 **记住密码**
 2. 打开管理中心 → **Grok SSO 导入**，页面会自动复用当前管理认证
-3. 粘贴 SSO Cookie（或 `email----sso` 多行）
+3. 粘贴 SSO Cookie（或 `email----sso` 多行），也可以选择本地 TXT 文件
 4. 点击 **开始转换并导入**
 5. 在结果表中查看每个账号的文件名、尝试次数和限流状态
 
@@ -136,9 +136,10 @@ GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
 
 ./cli-proxy-api \
   --grok-sso-file ./sso_list.txt \
-  --grok-sso-delay 45 \
-  --grok-sso-max-delay 180 \
-  --grok-sso-retries 8 \
+  --grok-sso-delay-min 3 \
+  --grok-sso-delay-max 15 \
+  --grok-sso-max-delay 30 \
+  --grok-sso-retries 3 \
   --grok-sso-account-retries 3
 ```
 
@@ -147,9 +148,11 @@ GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
 | `--grok-sso-cookie` | 单个 SSO JWT |
 | `--grok-sso-file` | 列表文件（一行一个 JWT，或 `email----sso`） |
 | `--grok-sso-email` | 可选 email 覆盖 |
-| `--grok-sso-delay` | 自适应批量账号基础间隔秒，默认 45 |
-| `--grok-sso-max-delay` | 自适应间隔上限秒，默认 180 |
-| `--grok-sso-retries` | Device / Verify / Approve 阶段最大重试次数，默认 8 |
+| `--grok-sso-delay` | 兼容旧调用的固定账号间隔；设置后覆盖随机范围 |
+| `--grok-sso-delay-min` | 随机账号间隔下限，默认 3 秒 |
+| `--grok-sso-delay-max` | 随机账号间隔上限，默认 15 秒 |
+| `--grok-sso-max-delay` | 自适应间隔上限秒，默认 30 |
+| `--grok-sso-retries` | Device / Verify / Approve 阶段最大重试次数，默认 3 |
 | `--grok-sso-account-retries` | 限流时整个账号的最大尝试次数，默认 3 |
 | `--grok-sso-validate` | 是否先访问 accounts.x.ai 校验 SSO，默认开启 |
 
@@ -195,7 +198,7 @@ GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
 本地模拟：
 
 ```bash
-make package VERSION=0.3.5
+make package VERSION=0.4.0
 # 产物在 dist/
 ```
 
@@ -229,7 +232,7 @@ go vet ./...
 make build
 ```
 
-核心转换逻辑在 `cmd/grok-sso2auth/sso.go`，SSO → Build 流程参考 `codex2api`：同时携带 `sso` / `sso-rw`，只把 HTTP 429、明确限流跳转或结构化 OAuth 错误识别为限流，不扫描正常 verification HTML。Device / Verify / Approve 分阶段重试；Verify 或 Approve 限流后会重新申请并再次打开 Device Code。批量间隔默认 45 秒，限流时按 `max(current×1.8, current+25, 45)` 提升（最高 180 秒），成功后按 `current×0.92` 缓慢回落，并加入 0–10 秒抖动。
+核心转换逻辑在 `cmd/grok-sso2auth/sso.go`，SSO → Build 流程参考 `codex2api`：同时携带 `sso` / `sso-rw`，只把 HTTP 429、明确限流跳转或结构化 OAuth 错误识别为限流，不扫描正常 verification HTML。Device / Verify / Approve 分阶段重试；Verify 或 Approve 限流后会重新申请并再次打开 Device Code。批量账号间隔默认在 3–15 秒内独立随机；限流后从 15 秒向最高 30 秒自适应提升，成功后缓慢回落。
 
 ---
 

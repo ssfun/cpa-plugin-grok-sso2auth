@@ -27,30 +27,34 @@ type conversionJobItem struct {
 }
 
 type conversionJob struct {
-	mu            sync.Mutex
-	ID            string
-	CreatedAt     time.Time
-	State         string
-	Items         []conversionJobItem
-	OK            int
-	Fail          int
-	WorkerDone    bool
-	BaseDelaySec  float64
-	FinalDelaySec float64
-	Request       convertRequest
+	mu              sync.Mutex
+	ID              string
+	CreatedAt       time.Time
+	State           string
+	Items           []conversionJobItem
+	OK              int
+	Fail            int
+	WorkerDone      bool
+	BaseDelaySec    float64
+	BaseDelayMinSec float64
+	BaseDelayMaxSec float64
+	FinalDelaySec   float64
+	Request         convertRequest
 }
 
 type conversionJobResponse struct {
-	JobID         string              `json:"job_id"`
-	State         string              `json:"state"`
-	Done          bool                `json:"done"`
-	OK            int                 `json:"ok"`
-	Fail          int                 `json:"fail"`
-	Total         int                 `json:"total"`
-	Items         []conversionJobItem `json:"items"`
-	BaseDelaySec  float64             `json:"base_delay_sec"`
-	FinalDelaySec float64             `json:"final_delay_sec"`
-	ElapsedSec    int                 `json:"elapsed_sec"`
+	JobID           string              `json:"job_id"`
+	State           string              `json:"state"`
+	Done            bool                `json:"done"`
+	OK              int                 `json:"ok"`
+	Fail            int                 `json:"fail"`
+	Total           int                 `json:"total"`
+	Items           []conversionJobItem `json:"items"`
+	BaseDelaySec    float64             `json:"base_delay_sec"`
+	BaseDelayMinSec float64             `json:"base_delay_min_sec"`
+	BaseDelayMaxSec float64             `json:"base_delay_max_sec"`
+	FinalDelaySec   float64             `json:"final_delay_sec"`
+	ElapsedSec      int                 `json:"elapsed_sec"`
 }
 
 var conversionJobs = struct {
@@ -71,10 +75,10 @@ func startConversionJob(body []byte) (int, any) {
 	if err != nil {
 		return http.StatusInternalServerError, map[string]string{"error": err.Error()}
 	}
-	pacer := newAdaptivePacer(req.BaseDelaySec, req.MaxDelaySec)
+	pacer := newRequestPacer(req)
 	job := &conversionJob{
 		ID: id, CreatedAt: time.Now(), State: "running", Request: req,
-		Items: make([]conversionJobItem, len(entries)), BaseDelaySec: pacer.Base(), FinalDelaySec: pacer.Current(),
+		Items: make([]conversionJobItem, len(entries)), BaseDelaySec: pacer.BaseMax(), BaseDelayMinSec: pacer.BaseMin(), BaseDelayMaxSec: pacer.BaseMax(), FinalDelaySec: pacer.Current(),
 	}
 	for i, entry := range entries {
 		job.Items[i] = conversionJobItem{Index: i + 1, Email: entry.Email, SSO: entry.SSO, Status: "queued", Stage: "queued", Message: "等待处理"}
@@ -224,7 +228,7 @@ func (job *conversionJob) snapshot() conversionJobResponse {
 	}
 	return conversionJobResponse{
 		JobID: job.ID, State: job.State, Done: job.State == "completed", OK: job.OK, Fail: job.Fail,
-		Total: len(items), Items: items, BaseDelaySec: job.BaseDelaySec, FinalDelaySec: job.FinalDelaySec,
+		Total: len(items), Items: items, BaseDelaySec: job.BaseDelaySec, BaseDelayMinSec: job.BaseDelayMinSec, BaseDelayMaxSec: job.BaseDelayMaxSec, FinalDelaySec: job.FinalDelaySec,
 		ElapsedSec: int(time.Since(job.CreatedAt).Seconds()),
 	}
 }

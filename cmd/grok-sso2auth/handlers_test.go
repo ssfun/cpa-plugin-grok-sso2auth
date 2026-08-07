@@ -97,7 +97,7 @@ func TestManagementUIServesHTML(t *testing.T) {
 			t.Fatalf("body still contains removed module %q", unwanted)
 		}
 	}
-	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver", "bootstrapBackground", "window.frameElement.style.backgroundColor", "parentReady", "resolvePreference"} {
+	for _, wanted := range []string{"已复用管理中心认证", "开始转换并导入", "选择 TXT 文件", `accept=".txt,text/plain"`, "base_delay_min_sec", "base_delay_max_sec", `value="30"`, `value="3"`, "max-height:360px", "position:sticky", "cli-proxy-auth", "account_retries", "cli-proxy-theme", `data-theme="dark"`, `data-theme="white"`, "MutationObserver", "bootstrapBackground", "window.frameElement.style.backgroundColor", "parentReady", "resolvePreference"} {
 		if !strings.Contains(body, wanted) {
 			t.Fatalf("body missing %q", wanted)
 		}
@@ -162,5 +162,14 @@ func TestFlagDefaults(t *testing.T) {
 	}
 	if got := boolFlag(nil, "missing", true); !got {
 		t.Fatal("validate SSO should default true")
+	}
+}
+
+func TestConversionDefaults(t *testing.T) {
+	if defaultBatchDelayMinSec != 3 || defaultBatchDelayMaxSec != 15 || defaultMaxDelaySec != 30 {
+		t.Fatalf("delay defaults = %v-%v max %v", defaultBatchDelayMinSec, defaultBatchDelayMaxSec, defaultMaxDelaySec)
+	}
+	if defaultStageRetries != 3 || defaultAccountRetries != 3 {
+		t.Fatalf("retry defaults = stage %d account %d", defaultStageRetries, defaultAccountRetries)
 	}
 }

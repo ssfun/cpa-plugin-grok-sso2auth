@@ -29,6 +29,9 @@ const (
 	mgmtConvertImportPath = "/plugins/grok-sso2auth/convert-import"
 	mgmtJobStartPath      = "/plugins/grok-sso2auth/convert-jobs"
 	mgmtJobStatusPath     = "/plugins/grok-sso2auth/convert-job-status"
+	mgmtJobPausePath      = "/plugins/grok-sso2auth/convert-job-pause"
+	mgmtJobResumePath     = "/plugins/grok-sso2auth/convert-job-resume"
+	mgmtJobTerminatePath  = "/plugins/grok-sso2auth/convert-job-terminate"
 
 	defaultBatchDelayMinSec = 3.0
 	defaultBatchDelayMaxSec = 15.0
@@ -38,7 +41,7 @@ const (
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.4.0"
+var pluginVersion = "0.5.0"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -136,8 +139,11 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			Routes: []managementRoute{
 				{Method: http.MethodPost, Path: mgmtConvertPath, Description: "SSO → xai auth JSON（不写入）"},
 				{Method: http.MethodPost, Path: mgmtConvertImportPath, Description: "SSO → xai auth JSON 并 host.auth.save 导入"},
-				{Method: http.MethodPost, Path: mgmtJobStartPath, Description: "启动可观测的 SSO 转换任务"},
-				{Method: http.MethodGet, Path: mgmtJobStatusPath, Description: "查询转换任务进度并写入已完成凭证"},
+				{Method: http.MethodPost, Path: mgmtJobStartPath, Description: "启动唯一的后台 SSO 转换和导入任务"},
+				{Method: http.MethodGet, Path: mgmtJobStatusPath, Description: "查询当前转换任务进度和结果"},
+				{Method: http.MethodPost, Path: mgmtJobPausePath, Description: "暂停当前转换任务"},
+				{Method: http.MethodPost, Path: mgmtJobResumePath, Description: "恢复当前转换任务"},
+				{Method: http.MethodPost, Path: mgmtJobTerminatePath, Description: "终止当前转换任务"},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -258,7 +264,13 @@ func handleManagement(raw []byte) ([]byte, error) {
 	case method == http.MethodPost && pathMatch(p, mgmtJobStartPath):
 		return okEnvelope(jsonAPIResponse(startConversionJob(req.Body)))
 	case method == http.MethodGet && pathMatch(p, mgmtJobStatusPath):
-		return okEnvelope(jsonAPIResponse(pollConversionJob(req.Query.Get("job_id"))))
+		return okEnvelope(jsonAPIResponse(currentConversionJobStatus()))
+	case method == http.MethodPost && pathMatch(p, mgmtJobPausePath):
+		return okEnvelope(jsonAPIResponse(controlCurrentConversionJob("pause")))
+	case method == http.MethodPost && pathMatch(p, mgmtJobResumePath):
+		return okEnvelope(jsonAPIResponse(controlCurrentConversionJob("resume")))
+	case method == http.MethodPost && pathMatch(p, mgmtJobTerminatePath):
+		return okEnvelope(jsonAPIResponse(controlCurrentConversionJob("terminate")))
 	default:
 		body, _ := json.Marshal(map[string]any{
 			"error":  "not_found",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -64,6 +65,7 @@ type XAIAuthFile struct {
 
 // ConvertOptions controls SSO → token conversion.
 type ConvertOptions struct {
+	Context        context.Context
 	SSO            string
 	Email          string
 	ValidateSSO    bool
@@ -71,6 +73,8 @@ type ConvertOptions struct {
 	BaseDelaySec   float64
 	PollTimeoutSec int
 	Progress       func(ConversionProgress)
+	Checkpoint     func() error
+	Sleep          func(time.Duration) error
 }
 
 type ConversionProgress struct {
@@ -81,6 +85,49 @@ type ConversionProgress struct {
 func reportProgress(opts ConvertOptions, stage, message string) {
 	if opts.Progress != nil {
 		opts.Progress(ConversionProgress{Stage: stage, Message: message})
+	}
+}
+
+type conversionControl struct {
+	ctx        context.Context
+	checkpoint func() error
+	sleepFn    func(time.Duration) error
+}
+
+func newConversionControl(opts ConvertOptions) *conversionControl {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &conversionControl{ctx: ctx, checkpoint: opts.Checkpoint, sleepFn: opts.Sleep}
+}
+
+func (c *conversionControl) wait() error {
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
+	if c.checkpoint != nil {
+		if err := c.checkpoint(); err != nil {
+			return err
+		}
+	}
+	return c.ctx.Err()
+}
+
+func (c *conversionControl) sleep(delay time.Duration) error {
+	if c.sleepFn != nil {
+		return c.sleepFn(delay)
+	}
+	if err := c.wait(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return c.wait()
+	case <-c.ctx.Done():
+		return c.ctx.Err()
 	}
 }
 
@@ -289,8 +336,8 @@ func backoff(base float64, attempt int, capSec float64) time.Duration {
 	return time.Duration(d)*time.Second + jitter
 }
 
-func doRequest(client *http.Client, method, rawURL string, body io.Reader, headers http.Header) (status int, finalURL string, respBody []byte, err error) {
-	req, errNew := http.NewRequest(method, rawURL, body)
+func doRequest(ctx context.Context, client *http.Client, method, rawURL string, body io.Reader, headers http.Header) (status int, finalURL string, respBody []byte, err error) {
+	req, errNew := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if errNew != nil {
 		return 0, "", nil, errNew
 	}
@@ -320,8 +367,11 @@ func doRequest(client *http.Client, method, rawURL string, body io.Reader, heade
 	return resp.StatusCode, resp.Request.URL.String(), data, nil
 }
 
-func validateSSO(client *http.Client) error {
-	status, finalURL, _, err := doRequest(client, http.MethodGet, xaiAccountsURL, nil, nil)
+func validateSSO(control *conversionControl, client *http.Client) error {
+	if err := control.wait(); err != nil {
+		return err
+	}
+	status, finalURL, _, err := doRequest(control.ctx, client, http.MethodGet, xaiAccountsURL, nil, nil)
 	if err != nil {
 		return fmt.Errorf("validate sso: %w", err)
 	}
@@ -332,8 +382,8 @@ func validateSSO(client *http.Client) error {
 	return nil
 }
 
-func requestFreshDevice(client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
-	dc, err := requestDeviceCode(client, maxRetries, baseDelay)
+func requestFreshDevice(control *conversionControl, client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
+	dc, err := requestDeviceCode(control, client, maxRetries, baseDelay)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +394,10 @@ func requestFreshDevice(client *http.Client, maxRetries int, baseDelay float64) 
 	if !safeXAIURL(verificationURL) {
 		return nil, fmt.Errorf("device/code returned an untrusted verification URI")
 	}
-	status, finalURL, body, err := doRequest(client, http.MethodGet, verificationURL, nil, nil)
+	if err := control.wait(); err != nil {
+		return nil, err
+	}
+	status, finalURL, body, err := doRequest(control.ctx, client, http.MethodGet, verificationURL, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("open verification URI: %w", err)
 	}
@@ -367,7 +420,7 @@ func flowReached(finalURL, destination string) bool {
 	return path == want || strings.HasSuffix(path, want) || strings.Contains(path, want+"/")
 }
 
-func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
+func requestDeviceCode(control *conversionControl, client *http.Client, maxRetries int, baseDelay float64) (*deviceCodeResponse, error) {
 	if maxRetries < 1 {
 		maxRetries = defaultStageRetries
 	}
@@ -377,12 +430,17 @@ func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (
 	}
 	var lastBody string
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := control.wait(); err != nil {
+			return nil, err
+		}
 		headers := make(http.Header)
 		headers.Set("Content-Type", "application/x-www-form-urlencoded")
-		status, _, body, err := doRequest(client, http.MethodPost, xaiDeviceCodeURL, strings.NewReader(form.Encode()), headers)
+		status, _, body, err := doRequest(control.ctx, client, http.MethodPost, xaiDeviceCodeURL, strings.NewReader(form.Encode()), headers)
 		if err != nil {
 			if attempt < maxRetries {
-				time.Sleep(backoff(baseDelay, attempt, 120))
+				if errSleep := control.sleep(backoff(baseDelay, attempt, 120)); errSleep != nil {
+					return nil, errSleep
+				}
 				continue
 			}
 			return nil, fmt.Errorf("device/code: %w", err)
@@ -390,7 +448,9 @@ func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (
 		lastBody = string(body)
 		if isRateLimited(status, lastBody, "") {
 			if attempt < maxRetries {
-				time.Sleep(backoff(baseDelay, attempt, 180))
+				if errSleep := control.sleep(backoff(baseDelay, attempt, 180)); errSleep != nil {
+					return nil, errSleep
+				}
 				continue
 			}
 			return nil, &rateLimitedError{msg: fmt.Sprintf("device/code rate limited HTTP %d", status)}
@@ -410,26 +470,33 @@ func requestDeviceCode(client *http.Client, maxRetries int, baseDelay float64) (
 	return nil, &rateLimitedError{msg: "device/code retries exhausted: " + trimBody(lastBody, 80)}
 }
 
-func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries int, baseDelay float64) error {
+func verifyAndApprove(control *conversionControl, client *http.Client, dc *deviceCodeResponse, maxRetries int, baseDelay float64) error {
 	if maxRetries < 1 {
 		maxRetries = defaultStageRetries
 	}
 	rateHits := 0
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := control.wait(); err != nil {
+			return err
+		}
 		// verify
 		form := url.Values{"user_code": {dc.UserCode}}
 		headers := make(http.Header)
 		headers.Set("Content-Type", "application/x-www-form-urlencoded")
-		status, finalURL, body, err := doRequest(client, http.MethodPost, xaiDeviceVerifyURL, strings.NewReader(form.Encode()), headers)
+		status, finalURL, body, err := doRequest(control.ctx, client, http.MethodPost, xaiDeviceVerifyURL, strings.NewReader(form.Encode()), headers)
 		if err != nil {
-			time.Sleep(backoff(baseDelay, attempt, 120))
+			if errSleep := control.sleep(backoff(baseDelay, attempt, 120)); errSleep != nil {
+				return errSleep
+			}
 			continue
 		}
 		if isRateLimited(status, string(body), finalURL) {
 			rateHits++
-			time.Sleep(backoff(baseDelay, attempt, 180))
+			if errSleep := control.sleep(backoff(baseDelay, attempt, 180)); errSleep != nil {
+				return errSleep
+			}
 			// refresh device code
-			fresh, errFresh := requestFreshDevice(client, maxRetries, baseDelay)
+			fresh, errFresh := requestFreshDevice(control, client, maxRetries, baseDelay)
 			if errFresh != nil {
 				return errFresh
 			}
@@ -447,15 +514,22 @@ func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries in
 			"principal_type": {"User"},
 			"principal_id":   {""},
 		}
-		status, finalURL, body, err = doRequest(client, http.MethodPost, xaiDeviceApproveURL, strings.NewReader(approveForm.Encode()), headers)
+		if err := control.wait(); err != nil {
+			return err
+		}
+		status, finalURL, body, err = doRequest(control.ctx, client, http.MethodPost, xaiDeviceApproveURL, strings.NewReader(approveForm.Encode()), headers)
 		if err != nil {
-			time.Sleep(backoff(baseDelay, attempt, 120))
+			if errSleep := control.sleep(backoff(baseDelay, attempt, 120)); errSleep != nil {
+				return errSleep
+			}
 			continue
 		}
 		if isRateLimited(status, string(body), finalURL) {
 			rateHits++
-			time.Sleep(backoff(baseDelay, attempt, 180))
-			fresh, errFresh := requestFreshDevice(client, maxRetries, baseDelay)
+			if errSleep := control.sleep(backoff(baseDelay, attempt, 180)); errSleep != nil {
+				return errSleep
+			}
+			fresh, errFresh := requestFreshDevice(control, client, maxRetries, baseDelay)
 			if errFresh != nil {
 				return errFresh
 			}
@@ -473,7 +547,7 @@ func verifyAndApprove(client *http.Client, dc *deviceCodeResponse, maxRetries in
 	return fmt.Errorf("verify/approve retries exhausted")
 }
 
-func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, timeoutSec int) (*TokenPayload, error) {
+func pollToken(control *conversionControl, client *http.Client, deviceCode string, intervalSec, expiresIn, timeoutSec int) (*TokenPayload, error) {
 	if intervalSec <= 0 {
 		intervalSec = 5
 	}
@@ -483,9 +557,27 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 	if expiresIn <= 0 {
 		expiresIn = 1800
 	}
-	deadline := time.Now().Add(time.Duration(min(expiresIn, timeoutSec)) * time.Second)
+	remaining := time.Duration(min(expiresIn, timeoutSec)) * time.Second
 	interval := time.Duration(intervalSec) * time.Second
-	for time.Now().Before(deadline) {
+	waitInterval := func() error {
+		delay := interval
+		if delay > remaining {
+			delay = remaining
+		}
+		if delay <= 0 {
+			return nil
+		}
+		if err := control.sleep(delay); err != nil {
+			return err
+		}
+		remaining -= delay
+		return nil
+	}
+	for remaining > 0 {
+		if err := control.wait(); err != nil {
+			return nil, err
+		}
+		requestStarted := time.Now()
 		form := url.Values{
 			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 			"client_id":   {xaiClientID},
@@ -493,9 +585,12 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 		}
 		headers := make(http.Header)
 		headers.Set("Content-Type", "application/x-www-form-urlencoded")
-		status, _, body, err := doRequest(client, http.MethodPost, xaiTokenEndpoint, strings.NewReader(form.Encode()), headers)
+		status, _, body, err := doRequest(control.ctx, client, http.MethodPost, xaiTokenEndpoint, strings.NewReader(form.Encode()), headers)
+		remaining -= time.Since(requestStarted)
 		if err != nil {
-			time.Sleep(interval)
+			if errSleep := waitInterval(); errSleep != nil {
+				return nil, errSleep
+			}
 			continue
 		}
 		if isRateLimited(status, string(body), "") && status == http.StatusTooManyRequests {
@@ -511,17 +606,23 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 			ExpiresIn        int    `json:"expires_in"`
 		}
 		if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
-			time.Sleep(interval)
+			if errSleep := waitInterval(); errSleep != nil {
+				return nil, errSleep
+			}
 			continue
 		}
 		if payload.Error != "" {
 			switch payload.Error {
 			case "authorization_pending":
-				time.Sleep(interval)
+				if errSleep := waitInterval(); errSleep != nil {
+					return nil, errSleep
+				}
 				continue
 			case "slow_down":
 				interval += 5 * time.Second
-				time.Sleep(interval)
+				if errSleep := waitInterval(); errSleep != nil {
+					return nil, errSleep
+				}
 				continue
 			default:
 				return nil, fmt.Errorf("token: %s %s", payload.Error, payload.ErrorDescription)
@@ -541,14 +642,17 @@ func pollToken(client *http.Client, deviceCode string, intervalSec, expiresIn, t
 	return nil, fmt.Errorf("token poll timeout")
 }
 
-func fetchUserinfoEmail(client *http.Client, accessToken string) string {
+func fetchUserinfoEmail(control *conversionControl, client *http.Client, accessToken string) string {
 	if strings.TrimSpace(accessToken) == "" {
 		return ""
 	}
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+accessToken)
 	headers.Set("Accept", "application/json")
-	status, _, body, err := doRequest(client, http.MethodGet, xaiUserinfoURL, nil, headers)
+	if err := control.wait(); err != nil {
+		return ""
+	}
+	status, _, body, err := doRequest(control.ctx, client, http.MethodGet, xaiUserinfoURL, nil, headers)
 	if err != nil || status != http.StatusOK {
 		return ""
 	}
@@ -699,6 +803,10 @@ func tokenToAuthFile(token *TokenPayload, emailOverride string) (string, XAIAuth
 
 // ConvertSSO runs the full SSO cookie → xAI OAuth auth-file conversion.
 func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
+	control := newConversionControl(opts)
+	if err := control.wait(); err != nil {
+		return nil, err
+	}
 	sso := strings.TrimSpace(opts.SSO)
 	if sso == "" {
 		return nil, fmt.Errorf("sso cookie is required")
@@ -725,32 +833,47 @@ func ConvertSSO(opts ConvertOptions) (*ConvertResult, error) {
 
 	if opts.ValidateSSO {
 		reportProgress(opts, "validate", "正在验证 SSO 登录状态")
-		if err := validateSSO(client); err != nil {
+		if err := validateSSO(control, client); err != nil {
 			return nil, err
 		}
 	}
 
+	if err := control.wait(); err != nil {
+		return nil, err
+	}
 	reportProgress(opts, "device_code", "正在申请 Device Code")
-	dc, errDC := requestFreshDevice(client, maxRetries, baseDelay)
+	dc, errDC := requestFreshDevice(control, client, maxRetries, baseDelay)
 	if errDC != nil {
 		return nil, fmt.Errorf("device authorization: %w", errDC)
 	}
 
+	if err := control.wait(); err != nil {
+		return nil, err
+	}
 	reportProgress(opts, "authorize", "正在自动验证并批准授权")
-	if err := verifyAndApprove(client, dc, maxRetries, baseDelay); err != nil {
+	if err := verifyAndApprove(control, client, dc, maxRetries, baseDelay); err != nil {
 		return nil, fmt.Errorf("authorize device: %w", err)
 	}
 
+	if err := control.wait(); err != nil {
+		return nil, err
+	}
 	reportProgress(opts, "token", "正在兑换 OAuth Token")
-	token, errTok := pollToken(client, dc.DeviceCode, dc.Interval, dc.ExpiresIn, pollTimeoutSec)
+	token, errTok := pollToken(control, client, dc.DeviceCode, dc.Interval, dc.ExpiresIn, pollTimeoutSec)
 	if errTok != nil {
 		return nil, fmt.Errorf("exchange token: %w", errTok)
 	}
 
 	email := strings.TrimSpace(opts.Email)
 	if email == "" {
+		if err := control.wait(); err != nil {
+			return nil, err
+		}
 		reportProgress(opts, "userinfo", "正在读取账号信息")
-		email = fetchUserinfoEmail(client, token.AccessToken)
+		email = fetchUserinfoEmail(control, client, token.AccessToken)
+	}
+	if err := control.wait(); err != nil {
+		return nil, err
 	}
 	token.Email = email
 	if token.Subject == "" {

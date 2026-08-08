@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.4.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.5.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -72,7 +72,7 @@ GitHub Actions 支持两种发布方式：推送 `v*` 标签会自动发布；�
 make build
 
 # 打 zip + sha256
-make package VERSION=0.4.0
+make package VERSION=0.5.0
 
 # 安装到默认插件目录
 make install
@@ -112,6 +112,8 @@ curl -H "Authorization: Bearer <management-key>" \
 4. 点击 **开始转换并导入**
 5. 在结果表中查看每个账号的文件名、尝试次数和限流状态
 
+转换和凭证写入由插件后台的唯一任务执行。切换页面或刷新不会中断任务；重新打开页面时会自动发现当前任务并恢复进度或最终结果。运行中的任务可以暂停、继续或终止；终止不会撤销此前已经成功导入的凭证。同一时间只允许一个转换任务，新的任务可在上一任务完成或终止后启动。任务状态保存在插件进程内，CLIProxyAPI 重启或插件重载后不会保留。
+
 自动认证依赖插件资源页与管理中心同源，并从管理中心的 `cli-proxy-auth` 持久会话读取认证。若未勾选“记住密码”，请回到管理中心重新登录；插件页面不会再次索要或保存 Management Key。
 
 页面会实时继承上游管理中心的羊毛纸、纯白、暗色和自动主题。独立打开资源页时，则读取 `cli-proxy-theme` 并在自动模式下跟随系统配色。
@@ -122,7 +124,10 @@ curl -H "Authorization: Bearer <management-key>" \
 POST /v0/management/plugins/grok-sso2auth/convert
 POST /v0/management/plugins/grok-sso2auth/convert-import
 POST /v0/management/plugins/grok-sso2auth/convert-jobs
-GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
+GET  /v0/management/plugins/grok-sso2auth/convert-job-status
+POST /v0/management/plugins/grok-sso2auth/convert-job-pause
+POST /v0/management/plugins/grok-sso2auth/convert-job-resume
+POST /v0/management/plugins/grok-sso2auth/convert-job-terminate
 ```
 
 ### 4. 命令行标志
@@ -198,7 +203,7 @@ GET  /v0/management/plugins/grok-sso2auth/convert-job-status?job_id=<JOB_ID>
 本地模拟：
 
 ```bash
-make package VERSION=0.4.0
+make package VERSION=0.5.0
 # 产物在 dist/
 ```
 

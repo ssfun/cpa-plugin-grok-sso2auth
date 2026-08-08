@@ -163,6 +163,7 @@ func uiHTML() []byte {
   .notice strong{display:block;margin-bottom:2px}.notice a{color:inherit}
   .progress{display:none;align-items:center;gap:12px;margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft)}.progress.show{display:flex}
   .spinner{width:18px;height:18px;border:2px solid var(--border-strong);border-right-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}.progress strong{display:block}.progress small{color:var(--muted)}
+  .job-actions{display:flex;justify-content:flex-end;gap:8px;margin:-6px 0 16px}.job-actions button{min-height:34px;padding:6px 12px}.job-actions .danger{border-color:var(--danger-border);background:var(--danger-bg);color:var(--danger)}.job-actions .danger:hover:not(:disabled){background:color-mix(in srgb,var(--danger) 18%,var(--danger-bg))}
   .live-progress{margin-bottom:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface-soft);overflow:hidden}.progress-overall{height:4px;background:var(--bg-tertiary)}.progress-overall span{display:block;height:100%;width:0;background:var(--success-color);transition:width .25s ease}.progress-list{display:grid;gap:0;max-height:360px;overflow:auto;overscroll-behavior:contain}.progress-item{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(200px,1.3fr);gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)}.progress-item:last-child{border-bottom:0}.progress-account{font-weight:650;overflow-wrap:anywhere}.progress-message{color:var(--muted);font-size:12px}.stage-track{display:flex;gap:5px;margin-top:7px}.stage-dot{width:18px;height:4px;border-radius:999px;background:var(--border-primary)}.stage-dot.done{background:var(--success-color)}.stage-dot.active{background:var(--amber-color)}.progress-item.failed .stage-dot.active{background:var(--failure-badge-text)}
   .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric{padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-soft)}
   .metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:2px;font-size:23px;font-variant-numeric:tabular-nums}.metric.ok strong{color:var(--success)}.metric.fail strong{color:var(--danger)}
@@ -236,7 +237,8 @@ func uiHTML() []byte {
         <p id="resultCaption">完成后会显示每个账号的凭证文件名与状态。</p>
       </div>
     </div>
-    <div id="progress" class="progress"><span class="spinner"></span><div><strong>正在转换并导入</strong><small id="elapsed">已运行 0 秒，请勿关闭页面</small></div></div>
+    <div id="progress" class="progress"><span class="spinner"></span><div><strong id="progressTitle">正在后台转换并导入</strong><small id="elapsed">已运行 0 秒，可安全切换或刷新页面</small></div></div>
+    <div id="jobActions" class="job-actions" hidden><button id="pauseButton" class="secondary" type="button">暂停任务</button><button id="resumeButton" class="secondary" type="button" hidden>继续任务</button><button id="terminateButton" class="danger" type="button">终止任务</button></div>
     <div id="liveProgress" class="live-progress" hidden><div class="progress-overall"><span id="overallBar"></span></div><div id="progressList" class="progress-list"></div></div>
     <div id="summary" class="summary" hidden>
       <div class="metric"><span>账号总数</span><strong id="totalMetric">0</strong></div>
@@ -257,10 +259,13 @@ func uiHTML() []byte {
   "use strict";
   const JOB_START_URL="/v0/management/plugins/grok-sso2auth/convert-jobs";
   const JOB_STATUS_URL="/v0/management/plugins/grok-sso2auth/convert-job-status";
+  const JOB_PAUSE_URL="/v0/management/plugins/grok-sso2auth/convert-job-pause";
+  const JOB_RESUME_URL="/v0/management/plugins/grok-sso2auth/convert-job-resume";
+  const JOB_TERMINATE_URL="/v0/management/plugins/grok-sso2auth/convert-job-terminate";
   const AUTH_STORAGE_KEY="cli-proxy-auth";
   const ENCRYPTED_PREFIX="enc::v1::";
   const LEGACY_KEYS=["managementKey","grok_sso2auth.management_key","grok_sso2auth_mgmt_key"];
-  const state={managementKey:"",busy:false,timer:0,startedAt:0};
+  const state={managementKey:"",busy:false,checking:true,controlling:false,timer:0,startedAt:0};
   const $=id=>document.getElementById(id);
 
   function escapeHTML(value){return String(value==null?"":value).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
@@ -308,27 +313,36 @@ func uiHTML() []byte {
     $("estimate").innerHTML=count?"<strong>"+count+" 个账号</strong> · 批量间预计等待 "+formatDuration(gaps*range.min)+"–"+formatDuration(gaps*range.max):"添加账号后显示预计批量等待时间";
     updateButton();
   }
-  function updateButton(){$("startButton").disabled=state.busy||!state.managementKey||parsedLines().length===0;}
+  function updateButton(){$("startButton").disabled=state.busy||state.checking||!state.managementKey||parsedLines().length===0;}
   function formatDuration(seconds){seconds=Math.round(seconds);if(seconds<60)return seconds+" 秒";const m=Math.floor(seconds/60),s=seconds%60;return m+" 分"+(s?" "+s+" 秒":"");}
-  function setBusy(busy){
+  function setBusy(busy,elapsedSec){
     state.busy=busy;$("startButton").classList.toggle("busy",busy);$("startButton").textContent=busy?"正在处理":"开始转换并导入";
     $("progress").classList.toggle("show",busy);
     if(state.timer){clearInterval(state.timer);state.timer=0;}
-    if(busy){state.startedAt=Date.now();state.timer=setInterval(()=>{$("elapsed").textContent="已运行 "+formatDuration((Date.now()-state.startedAt)/1000)+"，请勿关闭页面";},1000);}
+    if(busy){state.startedAt=Date.now()-Math.max(0,Number(elapsedSec)||0)*1000;const tick=()=>{$("elapsed").textContent="已运行 "+formatDuration((Date.now()-state.startedAt)/1000)+"，可安全切换或刷新页面";};tick();state.timer=setInterval(tick,1000);}
     updateButton();
   }
   const stageOrder=["validate","device_code","authorize","token","userinfo","import","done"];
+  function renderJobControls(data){
+    const jobState=String(data&&data.state||"");
+    const active=jobState==="running"||jobState==="paused"||jobState==="terminating";
+    $("jobActions").hidden=!active;
+    $("pauseButton").hidden=jobState!=="running";$("resumeButton").hidden=jobState!=="paused";
+    $("pauseButton").disabled=$("resumeButton").disabled=$("terminateButton").disabled=state.controlling||jobState==="terminating";
+    $("progressTitle").textContent=jobState==="paused"?"任务已暂停":jobState==="terminating"?"正在终止任务":"正在后台转换并导入";
+  }
   function renderLiveProgress(data){
     const items=Array.isArray(data.items)?data.items:[];
+    renderJobControls(data);
     $("liveProgress").hidden=false;
-    const complete=items.filter(item=>item.status==="success"||item.status==="failed").length;
+    const complete=items.filter(item=>item.status==="success"||item.status==="failed"||item.status==="terminated").length;
     $("overallBar").style.width=(items.length?complete/items.length*100:0)+"%";
     $("progressList").innerHTML=items.map(item=>{
       let active=item.status==="success"?stageOrder.length:stageOrder.indexOf(item.stage);if(active<0)active=item.status==="queued"?0:Math.max(0,stageOrder.indexOf("authorize"));
       const dots=stageOrder.map((stage,index)=>'<span class="stage-dot '+(index<active?'done':index===active?'active':'')+'" title="'+escapeHTML(stage)+'"></span>').join("");
       const label=item.email||("账号 "+item.index);
       const attempt=item.attempt>1?" · 第 "+item.attempt+" 次尝试":"";
-      return '<div class="progress-item '+(item.status==="failed"?'failed':'')+'"><div><div class="progress-account">'+escapeHTML(label)+'</div><div class="stage-track">'+dots+'</div></div><div><div>'+escapeHTML(item.message||"等待处理")+'</div><div class="progress-message">'+escapeHTML(item.error||item.stage||"")+attempt+'</div></div></div>';
+      return '<div class="progress-item '+(item.status==="failed"||item.status==="terminated"?'failed':'')+'"><div><div class="progress-account">'+escapeHTML(label)+'</div><div class="stage-track">'+dots+'</div></div><div><div>'+escapeHTML(item.message||"等待处理")+'</div><div class="progress-message">'+escapeHTML(item.error||item.stage||"")+attempt+'</div></div></div>';
     }).join("");
     $("resultCaption").textContent="已完成 "+complete+" / "+items.length+" 个账号；页面会自动刷新进度。";
   }
@@ -338,7 +352,7 @@ func uiHTML() []byte {
       const response=await fetch(url,{method,headers:{"Authorization":"Bearer "+state.managementKey,...(body?{"Content-Type":"application/json"}:{})},body:body?JSON.stringify(body):undefined,signal:controller.signal});
       let data={};try{data=await response.json();}catch(_){}
       if(response.status===401||response.status===403){setSession(false);throw new Error("管理认证已失效。请返回管理中心重新登录并勾选“记住密码”。");}
-      if(!response.ok)throw new Error(data.error||("请求失败（HTTP "+response.status+"）"));
+      if(!response.ok){const error=new Error(data.error||("请求失败（HTTP "+response.status+"）"));error.status=response.status;error.data=data;throw error;}
       return data;
     }finally{clearTimeout(timer);}
   }
@@ -347,11 +361,12 @@ func uiHTML() []byte {
     $("summary").hidden=false;$("placeholder").hidden=true;$("tableWrap").classList.add("show");
     $("totalMetric").textContent=data.total||items.length;$("okMetric").textContent=data.ok||0;$("failMetric").textContent=data.fail||0;
     $("delayMetric").textContent=Number.isFinite(Number(data.final_delay_sec))?Math.round(Number(data.final_delay_sec))+"s":"—";
-    $("resultCaption").textContent=(data.ok||0)+" / "+(data.total||items.length)+" 个账号已成功导入。";
+    $("jobActions").hidden=true;
+    $("resultCaption").textContent=data.state==="terminated"?"任务已终止；已完成的导入不会撤销。":(data.ok||0)+" / "+(data.total||items.length)+" 个账号已成功导入。";
     $("resultBody").innerHTML=items.map(item=>{
       const status=item.ok?'<span class="badge ok">成功</span>':'<span class="badge fail">失败</span>';
       const rate=item.rate_limited?'<span class="badge rate">遇到限流</span>':'';
-      return '<tr><td>'+escapeHTML(item.index)+'</td><td>'+status+rate+'</td><td class="account">'+escapeHTML(item.email||"—")+'</td><td><code>'+escapeHTML(item.file_name||"—")+'</code></td><td>'+escapeHTML(item.attempts||1)+'</td><td class="'+(item.ok?'muted':'error')+'">'+escapeHTML(item.error||"已写入 auth-dir")+'</td></tr>';
+      return '<tr><td>'+escapeHTML(item.index)+'</td><td>'+status+rate+'</td><td class="account">'+escapeHTML(item.email||"—")+'</td><td><code>'+escapeHTML(item.file_name||"—")+'</code></td><td>'+escapeHTML(item.attempt||1)+'</td><td class="'+(item.ok?'muted':'error')+'">'+escapeHTML(item.error||"已写入 auth-dir")+'</td></tr>';
     }).join("");
   }
   function renderRequestError(message){
@@ -369,8 +384,39 @@ func uiHTML() []byte {
     }catch(_){$("fileName").textContent="无法读取该文件";$("fileName").className="file-name field-error";}
   }
   function formatFileSize(bytes){return bytes<1024?bytes+" B":bytes<1024*1024?Math.ceil(bytes/1024)+" KB":(bytes/1024/1024).toFixed(1)+" MB";}
+  async function controlJob(action){
+    if(state.controlling)return;
+    if(action==="terminate"&&!window.confirm("确定终止当前任务？已经成功导入的凭证不会撤销。"))return;
+    const url=action==="pause"?JOB_PAUSE_URL:action==="resume"?JOB_RESUME_URL:JOB_TERMINATE_URL;
+    state.controlling=true;renderJobControls({state:action==="resume"?"paused":"running"});
+    try{renderLiveProgress(await apiRequest("POST",url,{},30000));}
+    catch(error){renderRequestError(error.message||String(error));}
+    finally{state.controlling=false;}
+  }
+  async function watchCurrentJob(initial){
+    let data=initial;
+    renderLiveProgress(data);
+    if(data.done){renderResult(data);return;}
+    setBusy(true,data.elapsed_sec);
+    do{
+      await new Promise(resolve=>setTimeout(resolve,700));
+      data=await apiRequest("GET",JOB_STATUS_URL,null,30000);
+      renderLiveProgress(data);
+    }while(!data.done);
+    renderResult(data);
+  }
+  async function restoreCurrentJob(){
+    state.checking=true;updateButton();
+    try{
+      const data=await apiRequest("GET",JOB_STATUS_URL,null,30000);
+      state.checking=false;
+      await watchCurrentJob(data);
+    }catch(error){
+      if(error&&error.status!==404)renderRequestError(error&&error.name==="AbortError"?"读取后台任务超时，请刷新页面重试。":(error.message||String(error)));
+    }finally{state.checking=false;setBusy(false);updateButton();}
+  }
   async function start(){
-    if(state.busy)return;
+    if(state.busy||state.checking)return;
     state.managementKey=loadManagementKey();setSession(Boolean(state.managementKey));
     if(!state.managementKey)return;
     const lines=parsedLines();if(!lines.length){updateInput();return;}
@@ -382,15 +428,14 @@ func uiHTML() []byte {
     setBusy(true);$("placeholder").className="result-placeholder";
     try{
       $("liveProgress").hidden=true;
-      const started=await apiRequest("POST",JOB_START_URL,payload,30000);
-      let data;
-      do{
-        await new Promise(resolve=>setTimeout(resolve,700));
-        data=await apiRequest("GET",JOB_STATUS_URL+"?job_id="+encodeURIComponent(started.job_id),null,30000);
-        renderLiveProgress(data);
-      }while(!data.done);
-      renderResult(data);
-    }catch(error){renderRequestError(error&&error.name==="AbortError"?"处理超时。可减少账号数量后重试。":(error.message||String(error)));}
+      await apiRequest("POST",JOB_START_URL,payload,30000);
+      await watchCurrentJob(await apiRequest("GET",JOB_STATUS_URL,null,30000));
+    }catch(error){
+      if(error&&error.status===409){
+        try{await watchCurrentJob(error.data&&error.data.job?error.data.job:await apiRequest("GET",JOB_STATUS_URL,null,30000));}
+        catch(resumeError){renderRequestError(resumeError.message||String(resumeError));}
+      }else renderRequestError(error&&error.name==="AbortError"?"请求超时；后台任务可能仍在执行，刷新页面即可恢复。":(error.message||String(error)));
+    }
     finally{setBusy(false);}
   }
   $("ssoInput").addEventListener("input",updateInput);
@@ -398,7 +443,11 @@ func uiHTML() []byte {
   $("fileButton").addEventListener("click",()=>$("ssoFile").click());
   $("ssoFile").addEventListener("change",loadTextFile);
   $("startButton").addEventListener("click",start);
+  $("pauseButton").addEventListener("click",()=>controlJob("pause"));
+  $("resumeButton").addEventListener("click",()=>controlJob("resume"));
+  $("terminateButton").addEventListener("click",()=>controlJob("terminate"));
   state.managementKey=loadManagementKey();setSession(Boolean(state.managementKey));updateInput();
+  if(state.managementKey)restoreCurrentJob();else{state.checking=false;updateButton();}
 })();
 </script>
 </body>

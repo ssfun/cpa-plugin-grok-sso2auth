@@ -41,7 +41,7 @@ const (
 )
 
 // Set via -ldflags "-X main.pluginVersion=..."
-var pluginVersion = "0.6.0"
+var pluginVersion = "0.6.1"
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`

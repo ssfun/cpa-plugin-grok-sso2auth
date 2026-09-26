@@ -554,6 +554,8 @@ func verifyAndApprove(control *conversionControl, client *http.Client, dc *devic
 			"principal_type": {"User"},
 			"principal_id":   {""},
 		}
+		// xAI requires the consent UI's Origin as well as its one-time token.
+		headers.Set("Origin", strings.TrimSuffix(xaiAccountsURL, "/"))
 		if err := control.wait(); err != nil {
 			return err
 		}

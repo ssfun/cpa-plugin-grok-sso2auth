@@ -2,7 +2,7 @@
 
 将 **xAI / Grok SSO Cookie** 经 OAuth Device Flow 转换成 CLIProxyAPI 可用的 `type=xai` / `auth_kind=oauth` 凭证，并通过宿主 `host.auth.save` **直接导入** auth-dir。
 
-**版本** `v0.6.0` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
+**版本** `v0.6.1` ｜ **平台** Linux / macOS / Windows / FreeBSD ｜ **License** MIT
 
 参考：
 
@@ -74,7 +74,7 @@ GitHub Actions 支持两种发布方式：推送 `v*` 标签会自动发布；�
 make build
 
 # 打 zip + sha256
-make package VERSION=0.6.0
+make package VERSION=0.6.1
 
 # 安装到默认插件目录
 make install
@@ -205,7 +205,7 @@ POST /v0/management/plugins/grok-sso2auth/convert-job-terminate
 本地模拟：
 
 ```bash
-make package VERSION=0.6.0
+make package VERSION=0.6.1
 # 产物在 dist/
 ```
 

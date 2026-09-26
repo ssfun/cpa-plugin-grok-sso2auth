@@ -43,12 +43,15 @@ func TestConsentConversionFlow(t *testing.T) {
 			http.DefaultTransport = consentTransport(func(r *http.Request) (*http.Response, error) {
 				status, body := 200, ""
 				headers := make(http.Header)
-				redirect := func(path string) { status = 303; headers.Set("Location", "https://auth.x.ai"+path) }
+				redirect := func(path string) { status = 303; headers.Set("Location", "https://accounts.x.ai"+path) }
 				switch r.URL.Path {
 				case "/oauth2/device/code":
-					body = `{"device_code":"device","user_code":"user","verification_uri":"https://auth.x.ai/oauth2/device","interval":1,"expires_in":60}`
+					body = `{"device_code":"device","user_code":"user","verification_uri":"https://accounts.x.ai/oauth2/device","interval":1,"expires_in":60}`
 				case "/oauth2/device":
 				case "/oauth2/device/verify":
+					if r.Header.Get("Origin") != "" {
+						t.Error("approve Origin leaked to verify")
+					}
 					verifies++
 					if err := r.ParseForm(); err != nil {
 						t.Fatal(err)
@@ -58,6 +61,9 @@ func TestConsentConversionFlow(t *testing.T) {
 					}
 					redirect("/oauth2/device/consent")
 				case "/oauth2/device/consent":
+					if r.URL.Host != "accounts.x.ai" {
+						t.Fatal("consent must follow the cross-host redirect")
+					}
 					body = tc.page
 					if tc.retry && verifies > 1 {
 						body = fresh
@@ -67,6 +73,11 @@ func TestConsentConversionFlow(t *testing.T) {
 					}
 				case "/oauth2/device/approve":
 					approves++
+					// Mirror the live endpoint: a valid token alone is insufficient.
+					if r.Header.Get("Origin") != "https://accounts.x.ai" {
+						status, body = http.StatusForbidden, "Request could not be verified"
+						break
+					}
 					if err := r.ParseForm(); err != nil {
 						t.Fatal(err)
 					}

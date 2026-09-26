@@ -17,7 +17,7 @@
 | 能力 | 说明 |
 |------|------|
 | **管理 UI** | CPA 管理中心菜单「Grok SSO 导入」；自动复用管理中心认证与主题，无需重复输入 Management Key |
-| **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `approve` → `token` → `userinfo` |
+| **SSO → xai JSON** | Device Flow：`device/code` → `verify` → `consent`（提取一次性 `consent_token`）→ `approve` → `token` → `userinfo` |
 | **一键导入** | 转换成功后调用 `host.auth.save` 写入 auth-dir（文件名 `xai-{email}.json`） |
 | **批量** | 粘贴或上传 TXT；多行 SSO / `email----password----sso`，限流时自动提高账号间隔 |
 | **可靠性** | 默认验证 SSO；阶段重试、账号级限流重跑、重新申请并打开 Device Code |

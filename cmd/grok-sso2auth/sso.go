@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -470,6 +472,36 @@ func requestDeviceCode(control *conversionControl, client *http.Client, maxRetri
 	return nil, &rateLimitedError{msg: "device/code retries exhausted: " + trimBody(lastBody, 80)}
 }
 
+var consentJWT = regexp.MustCompile(`[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)
+
+// The page may carry the token in an input or serialized application state.
+// Inspect only its header to distinguish it from other JWTs; xAI verifies the
+// signature and device binding when the original token is submitted to approve.
+func extractConsentToken(body []byte) (string, error) {
+	var token string
+	for _, candidate := range consentJWT.FindAllString(html.UnescapeString(string(body)), -1) {
+		header, err := base64.RawURLEncoding.DecodeString(strings.SplitN(candidate, ".", 2)[0])
+		if err != nil {
+			continue
+		}
+		var metadata struct {
+			Algorithm string `json:"alg"`
+			Type      string `json:"typ"`
+		}
+		if json.Unmarshal(header, &metadata) != nil || metadata.Algorithm != "ES256" || metadata.Type != "consent+jwt" {
+			continue
+		}
+		if token != "" && token != candidate {
+			return "", fmt.Errorf("consent page contains multiple distinct consent tokens")
+		}
+		token = candidate
+	}
+	if token == "" {
+		return "", fmt.Errorf("consent page missing ES256 consent+jwt token")
+	}
+	return token, nil
+}
+
 func verifyAndApprove(control *conversionControl, client *http.Client, dc *deviceCodeResponse, maxRetries int, baseDelay float64) error {
 	if maxRetries < 1 {
 		maxRetries = defaultStageRetries
@@ -503,12 +535,20 @@ func verifyAndApprove(control *conversionControl, client *http.Client, dc *devic
 			*dc = *fresh
 			continue
 		}
+		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			return fmt.Errorf("verify consent HTTP %d", status)
+		}
 		if !flowReached(finalURL, "consent") {
 			return fmt.Errorf("verify did not reach consent (HTTP %d): %s", status, finalURL)
+		}
+		consentToken, err := extractConsentToken(body)
+		if err != nil {
+			return err
 		}
 
 		// approve
 		approveForm := url.Values{
+			"consent_token":  {consentToken},
 			"user_code":      {dc.UserCode},
 			"action":         {"allow"},
 			"principal_type": {"User"},

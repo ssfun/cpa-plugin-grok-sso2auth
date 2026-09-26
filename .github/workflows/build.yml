@@ -11,6 +11,10 @@ on:
         description: '要发布的版本标签（例如 v0.3.6）；留空则只构建，不发布'
         required: false
         type: string
+      source_ref:
+        description: '构建源码的标签或提交；留空使用当前工作流提交'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -23,10 +27,20 @@ jobs:
     name: Prepare
     runs-on: ubuntu-24.04
     outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.metadata.outputs.version }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
       publish: ${{ steps.metadata.outputs.publish }}
     steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Pin source commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Resolve build and release metadata
         id: metadata
         env:
@@ -59,11 +73,14 @@ jobs:
           echo "publish=${PUBLISH}" >> "${GITHUB_OUTPUT}"
 
   test:
+    needs: prepare
     name: Test
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -113,6 +130,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -167,6 +186,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -232,6 +253,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -256,17 +279,20 @@ jobs:
 
       - name: Build FreeBSD shared library
         timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        env:
-          GOFLAGS: -trimpath -buildmode=c-shared
-        with:
-          dir: .
-          packages: ./cmd/${{ env.PLUGIN_ID }}
-          targets: freebsd-${{ matrix.goarch }}
-          out-dir: dist/freebsd-${{ matrix.goarch }}
-          output: ${{ env.PLUGIN_ID }}.so
-          flags: -ldflags=-s -w
-          x-flags: main.pluginVersion=${{ steps.release_metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          SYSROOT="${RUNNER_TEMP}/freebsd-14.3"
+          mkdir -p "${SYSROOT}" dist/freebsd-amd64
+          curl --fail --location --retry 3 \
+            https://archive.freebsd.org/old-releases/amd64/14.3-RELEASE/base.txz \
+            -o "${RUNNER_TEMP}/freebsd-base.txz"
+          tar -xf "${RUNNER_TEMP}/freebsd-base.txz" -C "${SYSROOT}" ./usr/include ./usr/lib ./lib
+          CGO_ENABLED=1 GOOS=freebsd GOARCH=amd64 \
+            CGO_LDFLAGS=-fuse-ld=lld \
+            CC="clang --target=x86_64-unknown-freebsd14.3 --sysroot=${SYSROOT}" \
+            go build -trimpath -buildmode=c-shared \
+              -ldflags "-s -w -X main.pluginVersion=${VERSION}" \
+              -o "dist/freebsd-amd64/${PLUGIN_ID}.so" "./cmd/${PLUGIN_ID}"
 
       - name: Package plugin
         run: |
@@ -307,7 +333,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-          RELEASE_EVENT: ${{ github.event_name }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
           sort dist/*.sha256 > dist/checksums.txt
@@ -320,8 +346,8 @@ jobs:
               TAG_OBJECT="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_OBJECT_SHA}" --jq '.object.type + " " + .object.sha')"
               read -r TAG_OBJECT_TYPE TAG_OBJECT_SHA <<< "${TAG_OBJECT}"
             done
-            if [[ "${RELEASE_EVENT}" == "workflow_dispatch" && "${TAG_OBJECT_SHA}" != "${GITHUB_SHA}" ]]; then
-              echo "Refusing to publish ${RELEASE_TAG}: the existing tag points to ${TAG_OBJECT_SHA}, not this build's ${GITHUB_SHA}." >&2
+            if [[ "${TAG_OBJECT_SHA}" != "${SOURCE_SHA}" ]]; then
+              echo "Refusing to publish ${RELEASE_TAG}: the existing tag points to ${TAG_OBJECT_SHA}, not this build's ${SOURCE_SHA}." >&2
               exit 1
             fi
           fi
@@ -332,7 +358,7 @@ jobs:
             if [[ "${TAG_EXISTS}" == "true" ]]; then
               TAG_ARGS=(--verify-tag)
             else
-              TAG_ARGS=(--target "${GITHUB_SHA}")
+              TAG_ARGS=(--target "${SOURCE_SHA}")
             fi
             gh release create "${RELEASE_TAG}" dist/*.zip dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
